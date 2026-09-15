@@ -18,7 +18,7 @@ var amountToSend = decimal.Parse(
     configuration["Web3Settings:AmountToSendEther"] ?? "0.0001",
     System.Globalization.CultureInfo.InvariantCulture);
 
-// DI
+// DI1
 var services = new ServiceCollection();
 
 services.AddSingleton<IWalletService, WalletService>();
