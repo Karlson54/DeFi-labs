@@ -1,6 +1,6 @@
-using Lab1.Models;
+using DeFi.Models;
 
-namespace Lab1.Services;
+namespace DeFi.Services;
 
 public interface ITransactionService
 {

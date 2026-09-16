@@ -1,6 +1,6 @@
 using System.Numerics;
 
-namespace Lab1.Models;
+namespace DeFi.Models;
 
 public record TransactionResult(
     string TransactionHash,

@@ -1,6 +1,6 @@
 using Nethereum.Web3;
 
-namespace Lab1.Services;
+namespace DeFi.Services;
 
 public class BalanceService : IBalanceService
 {

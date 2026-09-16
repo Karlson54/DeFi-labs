@@ -1,9 +1,9 @@
-using Lab1.Models;
+using DeFi.Models;
 using Nethereum.RPC.Eth.DTOs;
 using Nethereum.Web3;
 using Nethereum.Web3.Accounts;
 
-namespace Lab1.Services;
+namespace DeFi.Services;
 
 public class TransactionService : ITransactionService
 {

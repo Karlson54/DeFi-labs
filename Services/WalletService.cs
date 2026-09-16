@@ -1,8 +1,8 @@
 using System.Diagnostics;
-using Lab1.Models;
+using DeFi.Models;
 using Nethereum.Signer;
 
-namespace Lab1.Services;
+namespace DeFi.Services;
 
 public class WalletService : IWalletService
 {

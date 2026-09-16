@@ -1,4 +1,4 @@
-namespace Lab1.Models;
+namespace DeFi.Models;
 
 public record WalletInfo(
     string PrivateKeyHex,

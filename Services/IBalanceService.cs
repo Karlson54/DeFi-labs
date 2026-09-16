@@ -1,4 +1,4 @@
-namespace Lab1.Services;
+namespace DeFi.Services;
 
 public interface IBalanceService
 {
