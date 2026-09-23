@@ -1,88 +1,69 @@
 using System.Text;
+using DeFi.Data;
 using DeFi.Models;
 using DeFi.Services;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Nethereum.JsonRpc.Client;
+using Microsoft.EntityFrameworkCore;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-var configuration = new ConfigurationBuilder()
-    .SetBasePath(AppContext.BaseDirectory)
-    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Configuration
     .AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false)
-    .AddEnvironmentVariables("DEFILAB_")
-    .Build();
+    .AddEnvironmentVariables("DEFILAB_");
 
-var services = new ServiceCollection();
+builder.Services.Configure<Web3Settings>(builder.Configuration.GetSection("Web3Settings"));
+builder.Services.Configure<IndexerSettings>(builder.Configuration.GetSection("IndexerSettings"));
+builder.Services.Configure<CorsSettings>(builder.Configuration.GetSection("CorsSettings"));
 
-services.Configure<Web3Settings>(configuration.GetSection("Web3Settings"));
-services.Configure<SimulationSettings>(configuration.GetSection("SimulationSettings"));
+builder.Services.AddSingleton<IWeb3Factory, Web3Factory>();
+builder.Services.AddSingleton<IDeploymentStateStore, DeploymentStateStore>();
 
-services.AddSingleton<IContractArtifactProvider, ContractArtifactProvider>();
-services.AddSingleton<IWeb3Factory, Web3Factory>();
-services.AddSingleton<IDeploymentStateStore, DeploymentStateStore>();
-services.AddSingleton<ITokenService, TokenService>();
-services.AddSingleton<IDexPoolService, DexPoolService>();
-services.AddSingleton<ISimulationRunner, SimulationRunner>();
-services.AddSingleton<IReportRenderer, ConsoleReportRenderer>();
+builder.Services.AddDbContext<SwapIndexerDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("SwapIndexer")));
 
-await using var provider = services.BuildServiceProvider();
+const string CorsPolicyName = "ReactFrontend";
+var corsOrigin = builder.Configuration["CorsSettings:AllowedOrigin"] ?? "http://localhost:5173";
 
-try
+builder.Services.AddCors(options =>
 {
-    var runner = provider.GetRequiredService<ISimulationRunner>();
-    var renderer = provider.GetRequiredService<IReportRenderer>();
+    options.AddPolicy(CorsPolicyName, policy =>
+        policy.WithOrigins(corsOrigin).AllowAnyHeader().AllowAnyMethod());
+});
 
-    Console.WriteLine("Запуск симуляції AMM... (перший запуск розгортає контракти, це може зайняти хвилину)");
+builder.Services.AddHostedService<SwapIndexerService>();
 
-    var report = await runner.RunAsync();
+var app = builder.Build();
 
-    Console.WriteLine(renderer.Render(report));
-    return 0;
-}
-catch (HttpRequestException ex)
-{
-    WriteError(
-        "Не вдалося підключитися до RPC-вузла.",
-        "Перевірте, що локальна нода запущена (anvil або npx hardhat node) і що адреса " +
-        "у Web3Settings:RpcUrl збігається з тією, яку друкує нода.",
-        ex.Message);
-    return 1;
-}
-catch (RpcResponseException ex)
-{
-    WriteError(
-        "Вузол відхилив запит.",
-        "Типові причини: недостатньо коштів на газ, перевищено rate limit тестнету " +
-        "або транзакція відкотилася через require у контракті (див. текст нижче).",
-        ex.Message);
-    return 1;
-}
-catch (TimeoutException ex)
-{
-    WriteError(
-        "Транзакція не потрапила в блок за відведений час.",
-        "Збільште Web3Settings:TransactionTimeoutSeconds або перевірте, чи майнить нода блоки.",
-        ex.Message);
-    return 1;
-}
-catch (InvalidOperationException ex)
-{
-    WriteError("Помилка конфігурації або даних контракту.", null, ex.Message);
-    return 1;
-}
+app.UseCors(CorsPolicyName);
 
-static void WriteError(string title, string? hint, string details)
+app.MapGet("/api/swaps", async (string? trader, SwapIndexerDbContext db) =>
 {
-    Console.Error.WriteLine();
-    Console.Error.WriteLine($"[ПОМИЛКА] {title}");
+    var query = db.SwapRecords.AsNoTracking().OrderByDescending(r => r.BlockNumber).AsQueryable();
 
-    if (!string.IsNullOrWhiteSpace(hint))
+    if (!string.IsNullOrWhiteSpace(trader))
     {
-        Console.Error.WriteLine($"{hint}");
+        var normalized = trader.ToLowerInvariant();
+        query = query.Where(r => r.Trader.ToLower() == normalized);
     }
 
-    Console.Error.WriteLine($"Деталі: {details}");
-    Console.Error.WriteLine();
-}
+    var records = await query.Take(500).ToListAsync();
+
+    return Results.Ok(records.Select(r => new
+    {
+        r.TransactionHash,
+        r.BlockNumber,
+        r.Trader,
+        r.TokenIn,
+        r.AmountIn,
+        r.AmountOut,
+        r.FeeBps,
+        r.IndexedAtUtc
+    }));
+});
+
+app.MapGet("/api/health", () => Results.Ok(new { status = "ok" }));
+
+Console.WriteLine("Web3-індексатор та REST API запущено на http://localhost:5000.");
+
+await app.RunAsync();
