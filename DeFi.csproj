@@ -34,12 +34,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="bin\Debug\net8.0\deployment-state.json" />
     <Content Include="contracts\.DS_Store" />
   </ItemGroup>
 
   <ItemGroup>
     <_ContentIncludedByDefault Remove="contracts\artifacts\AssetToken.json" />
     <_ContentIncludedByDefault Remove="contracts\artifacts\DexPool.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="frontend\" />
   </ItemGroup>
 
 </Project>
