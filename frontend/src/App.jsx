@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { ethers } from 'ethers';
 
 const API_BASE_URL = 'http://localhost:5000';
@@ -8,6 +8,27 @@ function App() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const fetchHistory = useCallback(async (walletAddress) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/swaps?trader=${walletAddress}`);
+
+      if (!response.ok) {
+        throw new Error(`API повернув статус ${response.status}`);
+      }
+
+      const data = await response.json();
+      setHistory(data);
+    } catch (err) {
+      console.error('Помилка завантаження історії:', err);
+      setError('Не вдалося завантажити історію обмінів із бекенду.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   const connectWallet = async () => {
     if (!window.ethereum) {
@@ -27,26 +48,16 @@ function App() {
     }
   };
 
-  const fetchHistory = async (walletAddress) => {
-    setLoading(true);
-    setError(null);
+  // Автооновлення кожні 5 секунд, поки гаманець підключено
+  useEffect(() => {
+    if (!account) return;
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/swaps?trader=${walletAddress}`);
+    const intervalId = setInterval(() => {
+      fetchHistory(account);
+    }, 5000);
 
-      if (!response.ok) {
-        throw new Error(`API повернув статус ${response.status}`);
-      }
-
-      const data = await response.json();
-      setHistory(data);
-    } catch (err) {
-      console.error('Помилка завантаження історії:', err);
-      setError('Не вдалося завантажити історію обмінів із бекенду.');
-    } finally {
-      setLoading(false);
-    }
-  };
+    return () => clearInterval(intervalId);
+  }, [account, fetchHistory]);
 
   return (
       <div style={{ padding: '20px', fontFamily: 'Arial' }}>
@@ -59,13 +70,13 @@ function App() {
         ) : (
             <p>
               <strong>Підключено:</strong> {account}
+              {loading && <span style={{ marginLeft: '10px', color: 'gray' }}>оновлення...</span>}
             </p>
         )}
 
         {error && <p style={{ color: 'crimson' }}>{error}</p>}
-        {loading && <p>Завантаження...</p>}
 
-        <h2>Історія обмінів (з БД)</h2>
+        <h2>Історія обмінів (з БД, автооновлення кожні 5с)</h2>
         <table border="1" cellPadding="10" style={{ borderCollapse: 'collapse', width: '100%' }}>
           <thead>
           <tr>

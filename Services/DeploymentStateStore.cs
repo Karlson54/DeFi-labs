@@ -15,13 +15,13 @@ public sealed class DeploymentStateStore : IDeploymentStateStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public DeploymentStateStore(IOptions<Web3Settings> options)
+    public DeploymentStateStore(IOptions<Web3Settings> options, IHostEnvironment environment)
     {
         var configured = options.Value.StateFilePath;
 
         FilePath = Path.IsPathRooted(configured)
             ? configured
-            : Path.Combine(AppContext.BaseDirectory, configured);
+            : Path.Combine(environment.ContentRootPath, configured);
     }
 
     public string FilePath { get; }
