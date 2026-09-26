@@ -140,7 +140,8 @@ static async Task DeployOnceAsync(IServiceProvider services)
         deployer, addLiquidityGas, null, null, Web3.Convert.ToWei(1000m, 18), Web3.Convert.ToWei(2000m, 18));
     Console.WriteLine($"   tx: {addLiquidityReceipt.TransactionHash}, status: {addLiquidityReceipt.Status?.Value}");
 
-    var newState = new DeploymentState(chainId, deployer, tokenAAddress, tokenBAddress, poolAddress, DateTimeOffset.UtcNow);
+    var newState = new DeploymentState(chainId, deployer, tokenAAddress, tokenBAddress, poolAddress,
+        DateTimeOffset.UtcNow);
     await stateStore.SaveAsync(newState);
 
     Console.WriteLine($"Готово. deployment-state.json оновлено: {stateStore.FilePath}");
@@ -165,7 +166,8 @@ static async Task SwapOnceAsync(IServiceProvider services, string[] args)
 
     var amount = 50m;
     var amountArgIndex = Array.IndexOf(args, "--amount");
-    if (amountArgIndex >= 0 && amountArgIndex + 1 < args.Length && decimal.TryParse(args[amountArgIndex + 1], out var parsedAmount))
+    if (amountArgIndex >= 0 && amountArgIndex + 1 < args.Length &&
+        decimal.TryParse(args[amountArgIndex + 1], out var parsedAmount))
     {
         amount = parsedAmount;
     }
@@ -173,8 +175,10 @@ static async Task SwapOnceAsync(IServiceProvider services, string[] args)
     var amountInWei = Web3.Convert.ToWei(amount, 18);
     var web3 = web3Factory.Client;
 
-    const string approveAbi = "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"spender\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"approve\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]";
-    const string swapAbi = "[{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"amountIn\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"minAmountOut\",\"type\":\"uint256\"}],\"name\":\"swapAForB\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]";
+    const string approveAbi =
+        "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"spender\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"approve\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]";
+    const string swapAbi =
+        "[{\"inputs\":[{\"internalType\":\"uint256\",\"name\":\"amountIn\",\"type\":\"uint256\"},{\"internalType\":\"uint256\",\"name\":\"minAmountOut\",\"type\":\"uint256\"}],\"name\":\"swapAForB\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]";
 
     Console.WriteLine($"Своп {amount} токенів A -> B на пулі {state.PoolAddress}...");
 
@@ -192,7 +196,8 @@ static async Task SwapOnceAsync(IServiceProvider services, string[] args)
     Console.WriteLine("Готово. Індексатор підхопить подію Swap протягом кількох секунд.");
 }
 
-static async Task<string> DeployContractAsync(Web3 web3, string from, string abi, string bytecode, params object[] constructorArgs)
+static async Task<string> DeployContractAsync(Web3 web3, string from, string abi, string bytecode,
+    params object[] constructorArgs)
 {
     var gas = await web3.Eth.DeployContract.EstimateGasAsync(abi, bytecode, from, constructorArgs);
     var receipt = await web3.Eth.DeployContract.SendRequestAndWaitForReceiptAsync(
@@ -206,7 +211,8 @@ static async Task<string> DeployContractAsync(Web3 web3, string from, string abi
     return receipt.ContractAddress;
 }
 
-static async Task ApproveAsync(Web3 web3, string from, string tokenAbi, string tokenAddress, string spender, BigInteger amount)
+static async Task ApproveAsync(Web3 web3, string from, string tokenAbi, string tokenAddress, string spender,
+    BigInteger amount)
 {
     var tokenContract = web3.Eth.GetContract(tokenAbi, tokenAddress);
     var approveFunction = tokenContract.GetFunction("approve");
