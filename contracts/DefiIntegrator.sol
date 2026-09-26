@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./interfaces/IUniswapV2Router02.sol";
 
 /// @title DefiIntegrator
-/// @notice Демонструє композитність (Composability): цей контракт викликає
+/// @notice Демонструє композитність (Composability): наш контракт викликає
 ///         функції стороннього AMM-протоколу (Uniswap V2 Router) від імені
 ///         користувача, не переписуючи власну математику пулу.
 contract DefiIntegrator {
@@ -13,9 +13,9 @@ contract DefiIntegrator {
     // значення "запікається" прямо в байт-код).
     IUniswapV2Router02 public immutable router;
 
-    /// @param router_ адреса офіційного Router-контракту обраного DEX.
-    ///        Dependency Injection: замість hardcode-адреси контракт стає
-    ///        універсальним і працює як у Mainnet, так і в тестовій мережі.
+    /// @param router_ адреса офіційного Router-контракту обраного DEX
+    ///        (Dependency Injection: контракт стає універсальним — той самий
+    ///        код працює і в Mainnet, і в тестовій мережі).
     constructor(address router_) {
         require(router_ != address(0), "DefiIntegrator: zero router");
         router = IUniswapV2Router02(router_);
@@ -47,8 +47,8 @@ contract DefiIntegrator {
             amountBDesired,
             1,
             1,
-            msg.sender,                  // LP-токени йдуть напряму користувачу
-            block.timestamp + 5 minutes  // deadline: захист від застарілої транзакції
+            msg.sender,            // LP-токени йдуть напряму користувачу, не застрягають тут
+            block.timestamp + 5 minutes // deadline: захист від виконання застарілої tx майнером
         );
     }
 
@@ -68,9 +68,9 @@ contract DefiIntegrator {
 
         uint256[] memory amounts = router.swapExactTokensForTokens(
             amountIn,
-            amountOutMin,  // захист від проковзування: менше — Revert усієї tx
+            amountOutMin,     // захист від проковзування: менше — Revert усієї tx
             path,
-            msg.sender,     // вихідні токени йдуть напряму користувачу
+            msg.sender,        // вихідні токени йдуть напряму користувачу
             block.timestamp + 5 minutes
         );
 
