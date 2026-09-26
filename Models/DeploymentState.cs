@@ -1,11 +1,11 @@
-namespace DeFi.Models;
+namespace Defi.Models;
 
 public sealed record DeploymentState(
     long ChainId,
     string DeployerAddress,
     string? TokenAAddress,
     string? TokenBAddress,
-    string? PoolAddress,
+    string? IntegratorAddress,
     DateTimeOffset UpdatedAtUtc)
 {
     public static DeploymentState Empty(long chainId, string deployer) =>
@@ -14,9 +14,4 @@ public sealed record DeploymentState(
     public bool MatchesEnvironment(long chainId, string deployer) =>
         ChainId == chainId &&
         string.Equals(DeployerAddress, deployer, StringComparison.OrdinalIgnoreCase);
-
-    public bool HasFullDeployment =>
-        !string.IsNullOrWhiteSpace(TokenAAddress) &&
-        !string.IsNullOrWhiteSpace(TokenBAddress) &&
-        !string.IsNullOrWhiteSpace(PoolAddress);
 }

@@ -1,16 +1,14 @@
-using DeFi.Models;
+using Defi.Models;
 using Microsoft.Extensions.Options;
 using Nethereum.Web3;
 using Nethereum.Web3.Accounts;
 
-namespace DeFi.Services;
+namespace Defi.Services;
 
 public interface IWeb3Factory
 {
     Web3 Client { get; }
-
     string AccountAddress { get; }
-
     long ChainId { get; }
 }
 
@@ -32,8 +30,8 @@ public sealed class Web3Factory : IWeb3Factory
             {
                 throw new InvalidOperationException(
                     "У appsettings.json не заданий приватний ключ (Web3Settings:PrivateKey). " +
-                    "Вставте тестовий ключ локальної ноди. Реальний ключ від гаманця з коштами " +
-                    "в конфіг класти не можна, і файл із ним не можна комітити в git.");
+                    "Реальний ключ від гаманця з коштами в конфіг класти не можна, " +
+                    "і файл із ним не можна комітити в git.");
             }
 
             return new Account(key, _settings.ChainId);
@@ -43,8 +41,6 @@ public sealed class Web3Factory : IWeb3Factory
     }
 
     public Web3 Client => _client.Value;
-
     public string AccountAddress => _account.Value.Address;
-
     public long ChainId => _settings.ChainId;
 }

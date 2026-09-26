@@ -1,8 +1,8 @@
 using System.Text.Json;
-using DeFi.Models;
+using Defi.Models;
 using Microsoft.Extensions.Options;
 
-namespace DeFi.Services;
+namespace Defi.Services;
 
 public interface IDeploymentStateStore
 {
@@ -15,13 +15,13 @@ public sealed class DeploymentStateStore : IDeploymentStateStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public DeploymentStateStore(IOptions<Web3Settings> options, IHostEnvironment environment)
+    public DeploymentStateStore(IOptions<Web3Settings> options)
     {
         var configured = options.Value.StateFilePath;
 
         FilePath = Path.IsPathRooted(configured)
             ? configured
-            : Path.Combine(environment.ContentRootPath, configured);
+            : Path.Combine(AppContext.BaseDirectory, configured);
     }
 
     public string FilePath { get; }
