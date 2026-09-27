@@ -32,7 +32,6 @@ dlldata.c
 BenchmarkDotNet.Artifacts/
 project.lock.json
 project.fragment.lock.json
-artifacts/
 ScaffoldingReadMe.txt
 StyleCopReport.xml
 *_i.c
