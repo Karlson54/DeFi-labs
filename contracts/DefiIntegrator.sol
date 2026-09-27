@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "./interfaces/IUniswapV2Router02.sol";
+import "/IUniswapV2Router02.sol";
 
 /// @title DefiIntegrator
 /// @notice Демонструє композитність (Composability): наш контракт викликає
