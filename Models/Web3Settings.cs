@@ -1,4 +1,4 @@
-namespace Defi.Models;
+namespace DeFi.Models;
 
 public sealed class Web3Settings
 {

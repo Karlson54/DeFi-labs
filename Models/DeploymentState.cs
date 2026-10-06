@@ -1,15 +1,14 @@
-namespace Defi.Models;
+namespace DeFi.Models;
 
 public sealed record DeploymentState(
     long ChainId,
     string DeployerAddress,
-    string? TokenAAddress,
-    string? TokenBAddress,
-    string? IntegratorAddress,
+    string? StablecoinAddress,
+    string? EngineAddress,
     DateTimeOffset UpdatedAtUtc)
 {
     public static DeploymentState Empty(long chainId, string deployer) =>
-        new(chainId, deployer, null, null, null, DateTimeOffset.UtcNow);
+        new(chainId, deployer, null, null, DateTimeOffset.UtcNow);
 
     public bool MatchesEnvironment(long chainId, string deployer) =>
         ChainId == chainId &&

@@ -1,8 +1,8 @@
 using System.Text.Json;
-using Defi.Models;
+using DeFi.Models;
 using Microsoft.Extensions.Options;
 
-namespace Defi.Services;
+namespace DeFi.Services;
 
 public interface IDeploymentStateStore
 {

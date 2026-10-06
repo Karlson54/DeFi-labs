@@ -1,9 +1,9 @@
-using Defi.Models;
+using DeFi.Models;
 using Microsoft.Extensions.Options;
 using Nethereum.Web3;
 using Nethereum.Web3.Accounts;
 
-namespace Defi.Services;
+namespace DeFi.Services;
 
 public interface IWeb3Factory
 {

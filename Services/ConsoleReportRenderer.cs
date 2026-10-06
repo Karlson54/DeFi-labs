@@ -1,63 +1,82 @@
 using System.Globalization;
 using System.Text;
-using Defi.Models;
+using DeFi.Models;
 
-namespace Defi.Services;
+namespace DeFi.Services;
 
 public interface IReportRenderer
 {
-    string Render(IntegrationReport report);
+    string Render(ScenarioReport report);
 }
 
 public sealed class ConsoleReportRenderer : IReportRenderer
 {
     private static readonly CultureInfo Culture = CultureInfo.InvariantCulture;
 
-    public string Render(IntegrationReport report)
+    public string Render(ScenarioReport report)
     {
         var sb = new StringBuilder();
+        var symbol = report.Stablecoin.Symbol;
 
         Header(sb, "МЕРЕЖА ТА АКАУНТ");
         sb.AppendLine($"  Мережа................: {report.Network}");
-        sb.AppendLine($"  Акаунт................: {report.DeployerAddress}");
-        sb.AppendLine($"  Router (зовнішній DEX): {report.RouterAddress}");
+        sb.AppendLine($"  Акаунт (позичальник)..: {report.DeployerAddress}");
+        sb.AppendLine($"  Мок-ціна ETH/USD......: ${Num(report.EthUsdPrice)}");
 
-        Header(sb, "КРОК 1. ЕМІСІЯ ВЛАСНИХ ERC-20 ТОКЕНІВ");
-        RenderToken(sb, report.TokenA, "Токен A");
-        RenderToken(sb, report.TokenB, "Токен B");
+        Header(sb, "КРОК 1. РОЗГОРТАННЯ СТЕЙБЛКОЇНА ТА КРЕДИТНОГО ЯДРА");
+        sb.AppendLine($"  Стейблкоїн............: {report.Stablecoin.Name} ({symbol})");
+        sb.AppendLine($"    Адреса..............: {report.Stablecoin.Address}");
+        sb.AppendLine($"    Статус..............: {Status(report.Stablecoin.WasAlreadyDeployed)}");
+        sb.AppendLine($"  StableEngine..........: {report.Engine.Address}");
+        sb.AppendLine($"    Статус..............: {Status(report.Engine.WasAlreadyDeployed)}");
+        sb.AppendLine($"  transferOwnership.....: {(report.Ownership.WasAlreadyTransferred ? "вже виконано раніше" : "виконано щойно")}");
+        sb.AppendLine($"    Новий власник токена: {report.Ownership.NewOwner}");
 
-        Header(sb, "КРОК 2. РОЗГОРТАННЯ КОНТРАКТУ-ІНТЕГРАТОРА (DefiIntegrator)");
-        sb.AppendLine($"  Адреса інтегратора....: {report.Integrator.Address}");
-        sb.AppendLine($"  Статус................: {(report.Integrator.WasAlreadyDeployed ? "перевикористано з deployment-state.json" : "розгорнуто щойно")}");
-        if (report.Integrator.TransactionHash is not null)
-        {
-            sb.AppendLine($"  Транзакція деплою.....: {report.Integrator.TransactionHash}");
-        }
+        Header(sb, "КРОК 2. ВНЕСЕННЯ ЗАСТАВИ (depositCollateral)");
+        sb.AppendLine($"  Внесено...............: {Num(report.Deposit.AmountEth)} ETH");
+        sb.AppendLine($"  Транзакція............: {report.Deposit.TransactionHash} (gas: {report.Deposit.GasUsed})");
+        RenderPosition(sb, report.PositionAfterDeposit, symbol);
 
-        Header(sb, "КРОК 3. ДЕЛЕГОВАНЕ ДОДАВАННЯ ЛІКВІДНОСТІ (через Router стороннього протоколу)");
-        sb.AppendLine($"  Внесено...............: {Num(report.Liquidity.AmountA)} {report.TokenA.Symbol} + {Num(report.Liquidity.AmountB)} {report.TokenB.Symbol}");
-        sb.AppendLine($"  Транзакція............: {report.Liquidity.TransactionHash} (gas: {report.Liquidity.GasUsed})");
+        Header(sb, "КРОК 3. ЕМІСІЯ МАКСИМАЛЬНОЇ СУМИ СТЕЙБЛКОЇНІВ (mintStablecoin)");
+        sb.AppendLine($"  Випущено..............: {Num(report.Mint.Amount)} {symbol}");
+        sb.AppendLine($"  Транзакція............: {report.Mint.TransactionHash} (gas: {report.Mint.GasUsed})");
+        RenderPosition(sb, report.PositionAfterMint, symbol);
 
-        Header(sb, "КРОК 4. МІЖКОНТРАКТНИЙ ОБМІН (swapTokens -> Router.swapExactTokensForTokens)");
-        sb.AppendLine($"  Продано...............: {Num(report.Swap.AmountIn)} {report.TokenA.Symbol}");
-        sb.AppendLine($"  amountOutMin..........: {Num(report.Swap.AmountOutMin)} {report.TokenB.Symbol}");
-        sb.AppendLine($"  Транзакція............: {report.Swap.TransactionHash} (gas: {report.Swap.GasUsed})");
+        Header(sb, "КРОК 4. СПРОБА ЗНЯТИ ЗАСТАВУ (withdrawCollateral) — ОЧІКУЄТЬСЯ REVERT");
+        sb.AppendLine($"  Спроба зняти..........: {Num(report.BlockedWithdraw.AmountEth)} ETH");
+        sb.AppendLine($"  Причина відкату.......: {report.BlockedWithdraw.RevertReason}");
+        sb.AppendLine($"  Заставу не зменшено...: {Num(report.PositionAfterBlocked.CollateralEth)} ETH");
+        sb.AppendLine();
+        sb.AppendLine("  [OK] Захист спрацював успішно: транзакцію відхилено, бо Health Factor впав би нижче 1.");
+
+        Header(sb, "КРОК 5. ПОГАШЕННЯ БОРГУ (burnStablecoin) І ПОВТОРНЕ ЗНЯТТЯ");
+        sb.AppendLine($"  Спалено...............: {Num(report.Burn.Amount)} {symbol}");
+        sb.AppendLine($"  Транзакція............: {report.Burn.TransactionHash} (gas: {report.Burn.GasUsed})");
+        sb.AppendLine($"  Знято застави.........: {Num(report.WithdrawAfterBurn.AmountEth)} ETH");
+        sb.AppendLine($"  Транзакція............: {report.WithdrawAfterBurn.TransactionHash}");
+        RenderPosition(sb, report.FinalPosition, symbol);
 
         sb.AppendLine();
-        sb.AppendLine("Композитність підтверджена: DefiIntegrator викликав чужий Router-контракт,");
-        sb.AppendLine("не маючи власної реалізації математики AMM-пулу.");
+        sb.AppendLine("Over-collateralization підтверджено: протокол не дозволяє ні випустити");
+        sb.AppendLine("незабезпечений борг, ні вивести заставу, що залишає позицію неплатоспроможною.");
         sb.AppendLine();
 
         return sb.ToString();
     }
 
-    private static void RenderToken(StringBuilder sb, TokenDeploymentResult token, string label)
+    private static void RenderPosition(StringBuilder sb, PositionSnapshot position, string symbol)
     {
-        sb.AppendLine($"  {label}...............: {token.Name} ({token.Symbol})");
-        sb.AppendLine($"    Адреса..............: {token.Address}");
-        sb.AppendLine($"    Емісія..............: {Num(token.TotalSupply)} {token.Symbol}");
-        sb.AppendLine($"    Статус..............: {(token.WasAlreadyDeployed ? "перевикористано" : "розгорнуто щойно")}");
+        sb.AppendLine("  Позиція:");
+        sb.AppendLine($"    Застава.............: {Num(position.CollateralEth)} ETH (${Num(position.CollateralUsd)})");
+        sb.AppendLine($"    Борг................: {Num(position.DebtUsd)} {symbol}");
+        sb.AppendLine($"    Health Factor.......: {HealthFactor(position.HealthFactor)}");
     }
+
+    private static string HealthFactor(decimal? value) =>
+        value is null ? "∞ (боргу немає)" : value.Value.ToString("0.####", Culture);
+
+    private static string Status(bool wasAlreadyDeployed) =>
+        wasAlreadyDeployed ? "перевикористано з deployment-state.json" : "розгорнуто щойно";
 
     private static void Header(StringBuilder sb, string title)
     {
