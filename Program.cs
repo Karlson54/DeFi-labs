@@ -5,32 +5,33 @@ using Nethereum.JsonRpc.Client;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-//   dotnet run                -> підготовка стенду (деплой, позиція з HF ≈ 1.1, фінансування ліквідатора)
-//   dotnet run -- --bot       -> автономний бот-ліквідатор
-//   dotnet run -- --crash     -> бекдор: штучна неплатоспроможність позичальника
+//   dotnet run               -> повний життєвий цикл інвестора (контрольне завдання)
+//   dotnet run -- --stand    -> підготовка стенду: деплой, пул, депозит (без compound)
+//   dotnet run -- --bot      -> автономний бот-кіпер (викликає compound)
+//   dotnet run -- --donate   -> імітація фарму: переказ винагороди на сховище
 var runBot = args.Contains("--bot");
-var runCrash = args.Contains("--crash");
+var runStand = args.Contains("--stand");
+var runDonate = args.Contains("--donate");
 
 var configuration = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
     .AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false)
-    .AddEnvironmentVariables("DEFILAB6_")
+    .AddEnvironmentVariables("DEFILAB7_")
     .Build();
 
 var services = new ServiceCollection();
 
 services.Configure<Web3Settings>(configuration.GetSection("Web3Settings"));
-services.Configure<Lab6Settings>(configuration.GetSection("Lab6Settings"));
+services.Configure<Lab7Settings>(configuration.GetSection("Lab7Settings"));
 
 services.AddSingleton<IContractArtifactProvider, ContractArtifactProvider>();
 services.AddSingleton<IWeb3Factory, Web3Factory>();
 services.AddSingleton<IDeploymentStateStore, DeploymentStateStore>();
-services.AddSingleton<IWalletService, WalletService>();
-services.AddSingleton<IStablecoinService, StablecoinService>();
-services.AddSingleton<IStableEngineService, StableEngineService>();
-services.AddSingleton<ILiquidatorService, LiquidatorService>();
-services.AddSingleton<ILiquidatorBot, LiquidatorBot>();
+services.AddSingleton<ITokenService, TokenService>();
+services.AddSingleton<IRouterService, RouterService>();
+services.AddSingleton<IVaultService, VaultService>();
+services.AddSingleton<IKeeperBot, KeeperBot>();
 services.AddSingleton<IScenarioRunner, ScenarioRunner>();
 services.AddSingleton<IReportRenderer, ConsoleReportRenderer>();
 
@@ -47,7 +48,7 @@ try
 {
     if (runBot)
     {
-        var bot = provider.GetRequiredService<ILiquidatorBot>();
+        var bot = provider.GetRequiredService<IKeeperBot>();
         await bot.RunAsync(cts.Token);
         return 0;
     }
@@ -55,17 +56,24 @@ try
     var runner = provider.GetRequiredService<IScenarioRunner>();
     var renderer = provider.GetRequiredService<IReportRenderer>();
 
-    if (runCrash)
+    if (runDonate)
     {
-        Console.WriteLine("Лабораторний бекдор: штучне зменшення застави позичальника (Лаб. роб. №6)...");
-
-        var crash = await runner.SimulateCrashAsync(cts.Token);
-        Console.WriteLine(renderer.Render(crash));
+        Console.WriteLine("Імітація фарму: переказ винагороди на сховище (Лаб. роб. №7)...");
+        var donation = await runner.DonateRewardAsync(cts.Token);
+        Console.WriteLine(renderer.Render(donation));
         return 0;
     }
 
-    Console.WriteLine("Підготовка стенду: кредитний протокол + оракул Chainlink + ліквідатор (Лаб. роб. №6)...");
-    Console.WriteLine("Перший запуск розгортає контракти й виконує кілька транзакцій у Sepolia — це може зайняти кілька хвилин.");
+    if (runStand)
+    {
+        Console.WriteLine("Підготовка стенду: токени, пул у зовнішньому DEX, сховище, депозит (Лаб. роб. №7)...");
+        var stand = await runner.PrepareStandAsync(cts.Token);
+        Console.WriteLine(renderer.Render(stand));
+        return 0;
+    }
+
+    Console.WriteLine("Запуск життєвого циклу інвестора у сховищі з автокомпаундингом (Лаб. роб. №7)...");
+    Console.WriteLine("Перший запуск розгортає токени, наповнює пул і розгортає сховище — це може зайняти кілька хвилин.");
 
     var report = await runner.RunAsync(cts.Token);
     Console.WriteLine(renderer.Render(report));
@@ -80,7 +88,7 @@ catch (HttpRequestException ex)
 {
     WriteError(
         "Не вдалося підключитися до RPC-вузла.",
-        "Перевірте Web3Settings:RpcUrl (Infura/Alchemy endpoint для Sepolia) та інтернет-з'єднання.",
+        "Перевірте Web3Settings:RpcUrl (Infura/Alchemy endpoint для Sepolia або адреса локальної ноди) та інтернет-з'єднання.",
         ex.Message);
     return 1;
 }
@@ -88,8 +96,8 @@ catch (RpcResponseException ex)
 {
     WriteError(
         "Вузол відхилив запит.",
-        "Типові причини: недостатньо тестового ETH на газ чи заставу, невірна адреса оракула, " +
-        "застаріла ціна оракула (stale oracle price) або відкат через require у контракті.",
+        "Типові причини: недостатньо тестового ETH на газ, невірна адреса Router-а у Lab7Settings:RouterAddress, " +
+        "відсутній пул B->A або відкат через require у контракті.",
         ex.Message);
     return 1;
 }

@@ -7,9 +7,14 @@ namespace DeFi.Services;
 
 public interface IScenarioRunner
 {
+    /// <summary>Повний життєвий цикл інвестора: депозит -> винагорода -> compound -> перевірка -> зняття.</summary>
     Task<ScenarioReport> RunAsync(CancellationToken cancellationToken = default);
 
-    Task<CrashReport> SimulateCrashAsync(CancellationToken cancellationToken = default);
+    /// <summary>Підготовка стенду для бота: інфраструктура + депозит (без compound і зняття).</summary>
+    Task<StandReport> PrepareStandAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Імітація фарму: пряма відправка Токена B на адресу сховища.</summary>
+    Task<DonationReport> DonateRewardAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class ScenarioRunner : IScenarioRunner
@@ -17,219 +22,271 @@ public sealed class ScenarioRunner : IScenarioRunner
     private const int Decimals = 18;
 
     private readonly IWeb3Factory _web3Factory;
-    private readonly IStablecoinService _stablecoinService;
-    private readonly IStableEngineService _engineService;
-    private readonly IWalletService _walletService;
-    private readonly ILiquidatorService _liquidator;
+    private readonly ITokenService _tokenService;
+    private readonly IRouterService _routerService;
+    private readonly IVaultService _vaultService;
     private readonly IDeploymentStateStore _stateStore;
-    private readonly Lab6Settings _settings;
+    private readonly Lab7Settings _settings;
 
     public ScenarioRunner(
         IWeb3Factory web3Factory,
-        IStablecoinService stablecoinService,
-        IStableEngineService engineService,
-        IWalletService walletService,
-        ILiquidatorService liquidator,
+        ITokenService tokenService,
+        IRouterService routerService,
+        IVaultService vaultService,
         IDeploymentStateStore stateStore,
-        IOptions<Lab6Settings> settingsOptions)
+        IOptions<Lab7Settings> settingsOptions)
     {
         _web3Factory = web3Factory;
-        _stablecoinService = stablecoinService;
-        _engineService = engineService;
-        _walletService = walletService;
-        _liquidator = liquidator;
+        _tokenService = tokenService;
+        _routerService = routerService;
+        _vaultService = vaultService;
         _stateStore = stateStore;
         _settings = settingsOptions.Value;
     }
+
+    // Внутрішній контейнер результатів підготовки інфраструктури.
+    private sealed record Infrastructure(
+        TokenDeploymentResult TokenA,
+        TokenDeploymentResult TokenB,
+        LiquidityResult? Pool,
+        VaultDeploymentResult Vault);
 
     public async Task<ScenarioReport> RunAsync(CancellationToken cancellationToken = default)
     {
         ValidateSettings();
 
         var user = _web3Factory.AccountAddress;
-        var chainId = _web3Factory.ChainId;
-        var liquidatorAddress = _liquidator.Address;
+        var infra = await PrepareInfrastructureAsync(user, cancellationToken);
+        var vault = infra.Vault.Address;
 
-        if (string.Equals(user, liquidatorAddress, StringComparison.OrdinalIgnoreCase))
+        // КРОК 3. Депозит.
+        var (deposit, sharesWei, afterDeposit) = await DepositStepAsync(infra, user, cancellationToken);
+
+        // КРОК 4. Імітація винагороди: звичайний ERC-20 переказ Токена B на сховище.
+        var reward = await TransferRewardAsync(infra, cancellationToken);
+        var afterReward = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
+
+        // КРОК 5. compound(): продаж Токена B за Токен A через Router.
+        var rewardWei = await _tokenService.BalanceOfAsync(infra.TokenB.Address, vault, cancellationToken);
+        var compound = await _vaultService.CompoundAsync(vault, rewardWei, cancellationToken);
+        var afterCompound = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
+
+        // КРОК 6. Зняття акцій, випущених у цьому запуску, і порівняння з початковим депозитом.
+        var balanceBefore = await _tokenService.BalanceOfAsync(infra.TokenA.Address, user, cancellationToken);
+        var withdrawTx = await _vaultService.WithdrawAsync(vault, sharesWei, cancellationToken);
+        var balanceAfter = await _tokenService.BalanceOfAsync(infra.TokenA.Address, user, cancellationToken);
+
+        var withdraw = new WithdrawResult(
+            Web3.Convert.FromWei(sharesWei, Decimals),
+            Web3.Convert.FromWei(balanceAfter - balanceBefore, Decimals),
+            withdrawTx.TransactionHash,
+            withdrawTx.GasUsed);
+
+        var final = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
+
+        if (withdraw.Assets <= deposit.Assets)
         {
             throw new InvalidOperationException(
-                "Lab6Settings:LiquidatorPrivateKey збігається з Web3Settings:PrivateKey. " +
-                "Ліквідатор і позичальник мають бути різними акаунтами (самоліквідація заборонена).");
+                "КРИТИЧНО: після compound() інвестор отримав не більше, ніж вніс. " +
+                "Перевірте, що compound() обміняв винагороду на базовий актив і залишив її у сховищі (to = address(this)).");
         }
 
-        var state = await _stateStore.LoadAsync(chainId, user, cancellationToken);
-
-        var coin = await EnsureStablecoinAsync(state.StablecoinAddress, cancellationToken);
-        state = state with { StablecoinAddress = coin.Address };
-        await _stateStore.SaveAsync(state, cancellationToken);
-
-        var knownEngine = coin.WasAlreadyDeployed ? state.EngineAddress : null;
-        var engine = await EnsureEngineAsync(knownEngine, coin.Address, cancellationToken);
-        state = state with { EngineAddress = engine.Address };
-        await _stateStore.SaveAsync(state, cancellationToken);
-
-        var ownership = await _stablecoinService.TransferOwnershipAsync(coin.Address, engine.Address, cancellationToken);
-
-        var price = await _engineService.GetEthUsdPriceAsync(engine.Address, cancellationToken);
-
-        var before = await _engineService.GetPositionAsync(engine.Address, user, cancellationToken);
-        var missingEth = _settings.CollateralEth - before.CollateralEth;
-
-        var deposit = missingEth > 0
-            ? await _engineService.DepositCollateralAsync(engine.Address, missingEth, cancellationToken)
-            : new DepositResult(0m, TransactionHash: null, BigInteger.Zero);
-        var afterDeposit = await _engineService.GetPositionAsync(engine.Address, user, cancellationToken);
-
-        var mint = await _engineService.MintToHealthFactorAsync(
-            engine.Address, user, _settings.TargetHealthFactor, cancellationToken);
-        var afterMint = await _engineService.GetPositionAsync(engine.Address, user, cancellationToken);
-
-        var funding = await EnsureLiquidatorFundedAsync(coin.Address, afterMint.DebtWei, liquidatorAddress, cancellationToken);
-
         return new ScenarioReport(
-            Network: $"chainId {chainId}",
-            DeployerAddress: user,
-            LiquidatorAddress: liquidatorAddress,
-            EthUsdPrice: price,
-            Stablecoin: coin,
-            Engine: engine,
-            Ownership: ownership,
+            Network: $"chainId {_web3Factory.ChainId}",
+            UserAddress: user,
+            RouterAddress: _settings.RouterAddress,
+            TokenA: infra.TokenA,
+            TokenB: infra.TokenB,
+            Pool: infra.Pool,
+            Vault: infra.Vault,
             Deposit: deposit,
             PositionAfterDeposit: afterDeposit,
-            Mint: mint,
-            PositionAfterMint: afterMint,
-            Funding: funding);
+            Reward: reward,
+            PositionAfterReward: afterReward,
+            Compound: compound,
+            PositionAfterCompound: afterCompound,
+            Withdraw: withdraw,
+            FinalPosition: final);
     }
 
-    public async Task<CrashReport> SimulateCrashAsync(CancellationToken cancellationToken = default)
+    public async Task<StandReport> PrepareStandAsync(CancellationToken cancellationToken = default)
     {
         ValidateSettings();
 
-        var owner = _web3Factory.AccountAddress;
-        var chainId = _web3Factory.ChainId;
+        var user = _web3Factory.AccountAddress;
+        var infra = await PrepareInfrastructureAsync(user, cancellationToken);
+        var (deposit, _, afterDeposit) = await DepositStepAsync(infra, user, cancellationToken);
 
-        var state = await _stateStore.LoadAsync(chainId, owner, cancellationToken);
-
-        if (string.IsNullOrWhiteSpace(state.EngineAddress) || !await HasContractCodeAsync(state.EngineAddress))
-        {
-            throw new InvalidOperationException(
-                "Кредитне ядро ще не розгорнуте. Спочатку виконайте підготовку стенду: dotnet run");
-        }
-
-        var engine = state.EngineAddress!;
-
-        var before = await _engineService.GetPositionAsync(engine, owner, cancellationToken);
-
-        if (before.DebtWei.IsZero)
-        {
-            throw new InvalidOperationException(
-                "У позичальника немає боргу — ліквідувати нічого. Виконайте підготовку стенду: dotnet run");
-        }
-
-        var price = await _engineService.GetEthUsdPriceAsync(engine, cancellationToken);
-        var reduce = await _engineService.SimulateInsolvencyAsync(
-            engine, owner, _settings.CrashCollateralPercent, cancellationToken);
-        var after = await _engineService.GetPositionAsync(engine, owner, cancellationToken);
-
-        return new CrashReport(
-            Network: $"chainId {chainId}",
-            OwnerAddress: owner,
-            EngineAddress: engine,
-            EthUsdPrice: price,
-            Percent: _settings.CrashCollateralPercent,
-            Before: before,
-            Reduce: reduce,
-            After: after);
+        return new StandReport(
+            Network: $"chainId {_web3Factory.ChainId}",
+            UserAddress: user,
+            RouterAddress: _settings.RouterAddress,
+            TokenA: infra.TokenA,
+            TokenB: infra.TokenB,
+            Pool: infra.Pool,
+            Vault: infra.Vault,
+            Deposit: deposit,
+            PositionAfterDeposit: afterDeposit);
     }
+
+    public async Task<DonationReport> DonateRewardAsync(CancellationToken cancellationToken = default)
+    {
+        ValidateSettings();
+
+        var user = _web3Factory.AccountAddress;
+        var state = await _stateStore.LoadAsync(_web3Factory.ChainId, user, cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(state.VaultAddress) || string.IsNullOrWhiteSpace(state.TokenBAddress) ||
+            !await HasContractCodeAsync(state.VaultAddress))
+        {
+            throw new InvalidOperationException(
+                "Сховище ще не розгорнуте. Спочатку підготуйте стенд: dotnet run -- --stand");
+        }
+
+        var tx = await _tokenService.TransferAsync(state.TokenBAddress!, state.VaultAddress!, _settings.RewardAmount, cancellationToken);
+        var balanceWei = await _tokenService.BalanceOfAsync(state.TokenBAddress!, state.VaultAddress!, cancellationToken);
+
+        return new DonationReport(
+            Network: $"chainId {_web3Factory.ChainId}",
+            VaultAddress: state.VaultAddress!,
+            RewardSymbol: _settings.TokenB.Symbol,
+            Reward: new RewardTransferResult(_settings.RewardAmount, Web3.Convert.FromWei(balanceWei, Decimals), tx));
+    }
+
+    // ---------------------------------------------------------------------
+    // Кроки сценарію
+    // ---------------------------------------------------------------------
+
+    /// <summary>Токени A/B, пул у зовнішньому DEX, сховище — із перевикористанням наявних адрес.</summary>
+    private async Task<Infrastructure> PrepareInfrastructureAsync(string user, CancellationToken cancellationToken)
+    {
+        var state = await _stateStore.LoadAsync(_web3Factory.ChainId, user, cancellationToken);
+
+        var tokenA = await EnsureTokenAsync(_settings.TokenA, state.TokenAAddress, cancellationToken);
+        var tokenB = await EnsureTokenAsync(_settings.TokenB, state.TokenBAddress, cancellationToken);
+
+        // Якщо токени перевипущено або змінено Router — старе сховище й пул неактуальні.
+        var tokensChanged = !tokenA.WasAlreadyDeployed || !tokenB.WasAlreadyDeployed;
+        var routerChanged = !string.Equals(state.RouterAddress, _settings.RouterAddress, StringComparison.OrdinalIgnoreCase);
+
+        if (tokensChanged || routerChanged)
+        {
+            state = state with { VaultAddress = null, LiquidityProvided = false };
+        }
+
+        state = state with
+        {
+            TokenAAddress = tokenA.Address,
+            TokenBAddress = tokenB.Address,
+            RouterAddress = _settings.RouterAddress
+        };
+        await _stateStore.SaveAsync(state, cancellationToken);
+
+        // Пул A/B у зовнішньому протоколі: без нього compound() не зможе продати винагороду.
+        LiquidityResult? pool = null;
+        if (!state.LiquidityProvided)
+        {
+            await _tokenService.ApproveAsync(tokenA.Address, _settings.RouterAddress, _settings.PoolLiquidityA, cancellationToken);
+            await _tokenService.ApproveAsync(tokenB.Address, _settings.RouterAddress, _settings.PoolLiquidityB, cancellationToken);
+
+            pool = await _routerService.AddLiquidityAsync(
+                tokenA.Address, tokenB.Address,
+                _settings.PoolLiquidityA, _settings.PoolLiquidityB,
+                user, cancellationToken);
+
+            state = state with { LiquidityProvided = true };
+            await _stateStore.SaveAsync(state, cancellationToken);
+        }
+
+        var vault = await EnsureVaultAsync(state.VaultAddress, tokenA.Address, tokenB.Address, cancellationToken);
+        state = state with { VaultAddress = vault.Address };
+        await _stateStore.SaveAsync(state, cancellationToken);
+
+        return new Infrastructure(tokenA, tokenB, pool, vault);
+    }
+
+    private async Task<(DepositResult Deposit, BigInteger SharesWei, VaultSnapshot After)> DepositStepAsync(
+        Infrastructure infra, string user, CancellationToken cancellationToken)
+    {
+        var vault = infra.Vault.Address;
+
+        var before = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
+
+        // Сховище забирає токени через transferFrom, тому спершу потрібен approve.
+        await _tokenService.ApproveAsync(infra.TokenA.Address, vault, _settings.DepositAmount, cancellationToken);
+        var tx = await _vaultService.DepositAsync(vault, _settings.DepositAmount, cancellationToken);
+
+        var after = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
+
+        // Кількість отриманих акцій = приріст балансу акцій користувача.
+        var sharesWei = after.SharesWei - before.SharesWei;
+
+        var deposit = new DepositResult(
+            _settings.DepositAmount,
+            Web3.Convert.FromWei(sharesWei, Decimals),
+            tx.TransactionHash,
+            tx.GasUsed);
+
+        return (deposit, sharesWei, after);
+    }
+
+    private async Task<RewardTransferResult> TransferRewardAsync(Infrastructure infra, CancellationToken cancellationToken)
+    {
+        var tx = await _tokenService.TransferAsync(
+            infra.TokenB.Address, infra.Vault.Address, _settings.RewardAmount, cancellationToken);
+
+        var balanceWei = await _tokenService.BalanceOfAsync(infra.TokenB.Address, infra.Vault.Address, cancellationToken);
+
+        return new RewardTransferResult(_settings.RewardAmount, Web3.Convert.FromWei(balanceWei, Decimals), tx);
+    }
+
+    // ---------------------------------------------------------------------
+    // Допоміжні методи
+    // ---------------------------------------------------------------------
 
     private void ValidateSettings()
     {
-        if (_settings.CollateralEth <= 0)
-        {
-            throw new InvalidOperationException("У Lab6Settings:CollateralEth має бути додатне значення.");
-        }
-
-        if (_settings.TargetHealthFactor < 1m)
-        {
-            throw new InvalidOperationException("Lab6Settings:TargetHealthFactor не може бути меншим за 1.");
-        }
-
-        if (_settings.CrashCollateralPercent <= 0 || _settings.CrashCollateralPercent >= 100)
-        {
-            throw new InvalidOperationException("Lab6Settings:CrashCollateralPercent має бути в діапазоні (0; 100).");
-        }
-
-        if (_settings.TargetHealthFactor * (1m - _settings.CrashCollateralPercent / 100m) >= 1m)
+        if (string.IsNullOrWhiteSpace(_settings.RouterAddress) ||
+            _settings.RouterAddress.StartsWith("0x_", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException(
-                "При таких TargetHealthFactor і CrashCollateralPercent позиція не стане неплатоспроможною " +
-                "(HF залишиться ≥ 1). Збільште CrashCollateralPercent.");
+                "У appsettings.json не задано Lab7Settings:RouterAddress — адресу Router-контракту " +
+                "Uniswap V2 (або сумісного форку) у тій мережі, куди виконується деплой.");
         }
 
-        if (string.IsNullOrWhiteSpace(_settings.PriceFeedAddress))
+        if (_settings.DepositAmount <= 0 || _settings.RewardAmount <= 0 ||
+            _settings.PoolLiquidityA <= 0 || _settings.PoolLiquidityB <= 0)
         {
-            throw new InvalidOperationException("У Lab6Settings:PriceFeedAddress не задано адресу Chainlink Data Feed.");
+            throw new InvalidOperationException(
+                "У Lab7Settings мають бути додатними DepositAmount, RewardAmount, PoolLiquidityA та PoolLiquidityB.");
         }
 
-        if (string.IsNullOrWhiteSpace(_settings.Stablecoin.Name) || string.IsNullOrWhiteSpace(_settings.Stablecoin.Symbol))
+        if (string.IsNullOrWhiteSpace(_settings.TokenA.Symbol) || string.IsNullOrWhiteSpace(_settings.TokenB.Symbol))
         {
-            throw new InvalidOperationException("У Lab6Settings:Stablecoin мають бути задані Name та Symbol.");
+            throw new InvalidOperationException("У Lab7Settings:TokenA та TokenB мають бути задані Name і Symbol.");
         }
     }
 
-    private async Task<StablecoinDeploymentResult> EnsureStablecoinAsync(string? knownAddress, CancellationToken cancellationToken)
+    private async Task<TokenDeploymentResult> EnsureTokenAsync(TokenSettings settings, string? knownAddress, CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(knownAddress) && await HasContractCodeAsync(knownAddress))
         {
-            return _stablecoinService.Describe(_settings.Stablecoin, knownAddress);
+            return await _tokenService.DescribeAsync(settings, knownAddress, cancellationToken);
         }
 
-        return await _stablecoinService.DeployAsync(_settings.Stablecoin, cancellationToken);
+        return await _tokenService.DeployAsync(settings, cancellationToken);
     }
 
-    private async Task<EngineDeploymentResult> EnsureEngineAsync(string? knownAddress, string stablecoinAddress, CancellationToken cancellationToken)
+    private async Task<VaultDeploymentResult> EnsureVaultAsync(string? knownAddress, string assetAddress, string rewardAddress, CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(knownAddress) && await HasContractCodeAsync(knownAddress))
         {
-            return new EngineDeploymentResult(
-                knownAddress, stablecoinAddress, _settings.PriceFeedAddress,
+            return new VaultDeploymentResult(
+                knownAddress, assetAddress, rewardAddress, _settings.RouterAddress,
                 WasAlreadyDeployed: true, TransactionHash: null);
         }
 
-        return await _engineService.DeployAsync(stablecoinAddress, _settings.PriceFeedAddress, cancellationToken);
-    }
-
-    private async Task<LiquidatorFundingResult> EnsureLiquidatorFundedAsync(
-        string stablecoinAddress, BigInteger debtWei, string liquidatorAddress, CancellationToken cancellationToken)
-    {
-        var ethBalance = await _walletService.GetEthBalanceAsync(liquidatorAddress, cancellationToken);
-        decimal ethSent = 0m;
-        string? ethTx = null;
-
-        if (ethBalance < _settings.LiquidatorMinEth)
-        {
-            ethSent = _settings.LiquidatorMinEth - ethBalance;
-            ethTx = await _walletService.TransferEthAsync(liquidatorAddress, ethSent, cancellationToken);
-        }
-
-        var stableBalanceWei = await _liquidator.GetStablecoinBalanceAsync(stablecoinAddress, cancellationToken);
-        var stableSentWei = BigInteger.Zero;
-        string? stableTx = null;
-
-        if (stableBalanceWei < debtWei)
-        {
-            stableSentWei = debtWei - stableBalanceWei;
-            stableTx = await _stablecoinService.TransferAsync(stablecoinAddress, liquidatorAddress, stableSentWei, cancellationToken);
-        }
-
-        var ethAfter = await _walletService.GetEthBalanceAsync(liquidatorAddress, cancellationToken);
-        var stableAfterWei = await _liquidator.GetStablecoinBalanceAsync(stablecoinAddress, cancellationToken);
-
-        return new LiquidatorFundingResult(
-            liquidatorAddress,
-            ethSent, ethTx, ethAfter,
-            Web3.Convert.FromWei(stableSentWei, Decimals), stableTx,
-            Web3.Convert.FromWei(stableAfterWei, Decimals));
+        return await _vaultService.DeployAsync(assetAddress, rewardAddress, _settings.RouterAddress, cancellationToken);
     }
 
     private async Task<bool> HasContractCodeAsync(string address)

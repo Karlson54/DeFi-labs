@@ -8,7 +8,9 @@ public interface IReportRenderer
 {
     string Render(ScenarioReport report);
 
-    string Render(CrashReport report);
+    string Render(StandReport report);
+
+    string Render(DonationReport report);
 }
 
 public sealed class ConsoleReportRenderer : IReportRenderer
@@ -18,119 +20,142 @@ public sealed class ConsoleReportRenderer : IReportRenderer
     public string Render(ScenarioReport report)
     {
         var sb = new StringBuilder();
-        var symbol = report.Stablecoin.Symbol;
+        var assetSymbol = report.TokenA.Symbol;
+        var rewardSymbol = report.TokenB.Symbol;
 
-        Header(sb, "МЕРЕЖА ТА АКАУНТИ");
-        sb.AppendLine($"  Мережа................: {report.Network}");
-        sb.AppendLine($"  Позичальник (власник).: {report.DeployerAddress}");
-        sb.AppendLine($"  Ліквідатор (бот)......: {report.LiquidatorAddress}");
-        sb.AppendLine($"  Оракул Chainlink......: {report.Engine.PriceFeedAddress}");
-        sb.AppendLine($"  Ціна ETH/USD (oracle).: ${Num(report.EthUsdPrice)}");
+        RenderInfrastructure(sb, report.Network, report.UserAddress, report.RouterAddress,
+            report.TokenA, report.TokenB, report.Pool, report.Vault);
 
-        Header(sb, "КРОК 1. РОЗГОРТАННЯ СТЕЙБЛКОЇНА ТА КРЕДИТНОГО ЯДРА");
-        sb.AppendLine($"  Стейблкоїн............: {report.Stablecoin.Name} ({symbol})");
-        sb.AppendLine($"    Адреса..............: {report.Stablecoin.Address}");
-        sb.AppendLine($"    Статус..............: {Status(report.Stablecoin.WasAlreadyDeployed)}");
-        sb.AppendLine($"  StableEngine..........: {report.Engine.Address}");
-        sb.AppendLine($"    Статус..............: {Status(report.Engine.WasAlreadyDeployed)}");
-        sb.AppendLine($"  transferOwnership.....: {(report.Ownership.WasAlreadyTransferred ? "вже виконано раніше" : "виконано щойно")}");
-        sb.AppendLine($"    Новий власник токена: {report.Ownership.NewOwner}");
+        Header(sb, "КРОК 3. ДЕПОЗИТ У СХОВИЩЕ (deposit)");
+        sb.AppendLine($"  Внесено...............: {Num(report.Deposit.Assets)} {assetSymbol}");
+        sb.AppendLine($"  Отримано акцій........: {Num(report.Deposit.Shares)} {report.Vault.Address[..8]}… (shares)");
+        sb.AppendLine($"  Транзакція............: {report.Deposit.TransactionHash} (gas: {report.Deposit.GasUsed})");
+        RenderPosition(sb, report.PositionAfterDeposit, assetSymbol);
 
-        Header(sb, "КРОК 2. ВНЕСЕННЯ ЗАСТАВИ (depositCollateral)");
-        if (report.Deposit.TransactionHash is null)
-        {
-            sb.AppendLine("  Пропущено.............: потрібна застава вже внесена");
-        }
-        else
-        {
-            sb.AppendLine($"  Внесено...............: {Num(report.Deposit.AmountEth)} ETH");
-            sb.AppendLine($"  Транзакція............: {report.Deposit.TransactionHash} (gas: {report.Deposit.GasUsed})");
-        }
-        RenderPosition(sb, report.PositionAfterDeposit, symbol);
+        Header(sb, "КРОК 4. ІМІТАЦІЯ ВИНАГОРОДИ (прямий ERC-20 переказ на сховище)");
+        sb.AppendLine($"  Надіслано.............: {Num(report.Reward.Amount)} {rewardSymbol}");
+        sb.AppendLine($"  Баланс винагороди.....: {Num(report.Reward.RewardBalanceInVault)} {rewardSymbol}");
+        sb.AppendLine($"  Транзакція............: {report.Reward.TransactionHash}");
+        RenderPosition(sb, report.PositionAfterReward, assetSymbol);
+        sb.AppendLine();
+        sb.AppendLine("  Зверніть увагу: ціна акції не змінилась — токени винагороди ще не входять у totalAssets().");
 
-        Header(sb, "КРОК 3. ЕМІСІЯ СТЕЙБЛКОЇНІВ ДО HEALTH FACTOR ≈ ЦІЛЬОВОГО");
-        if (report.Mint.TransactionHash is null)
-        {
-            sb.AppendLine("  Пропущено.............: борг уже не менший за цільовий");
-        }
-        else
-        {
-            sb.AppendLine($"  Випущено..............: {Num(report.Mint.Amount)} {symbol}");
-            sb.AppendLine($"  Транзакція............: {report.Mint.TransactionHash} (gas: {report.Mint.GasUsed})");
-        }
-        RenderPosition(sb, report.PositionAfterMint, symbol);
+        Header(sb, "КРОК 5. РЕІНВЕСТУВАННЯ (compound -> Router.swapExactTokensForTokens)");
+        sb.AppendLine($"  Продано винагороди....: {Num(report.Compound.RewardSold)} {rewardSymbol}");
+        sb.AppendLine($"  Отримано активу.......: {Num(report.Compound.AssetsReceived)} {assetSymbol}");
+        sb.AppendLine($"  totalAssets...........: {Num(report.Compound.TotalAssetsBefore)} -> {Num(report.Compound.TotalAssetsAfter)} {assetSymbol}");
+        sb.AppendLine($"  Транзакція............: {report.Compound.TransactionHash} (gas: {report.Compound.GasUsed})");
+        RenderPosition(sb, report.PositionAfterCompound, assetSymbol);
 
-        Header(sb, "КРОК 4. ПІДГОТОВКА ГАМАНЦЯ ЛІКВІДАТОРА");
-        var f = report.Funding;
-        sb.AppendLine($"  ETH на газ............: надіслано {Num(f.EthSent)}, баланс {Num(f.EthBalance)} ETH");
-        if (f.EthTransactionHash is not null)
-        {
-            sb.AppendLine($"    Транзакція..........: {f.EthTransactionHash}");
-        }
-        sb.AppendLine($"  Стейблкоїни для викупу: надіслано {Num(f.StableSent)}, баланс {Num(f.StableBalance)} {symbol}");
-        if (f.StableTransactionHash is not null)
-        {
-            sb.AppendLine($"    Транзакція..........: {f.StableTransactionHash}");
-        }
+        Header(sb, "КРОК 6. ПЕРЕВІРКА ВАРТОСТІ АКЦІЙ (convertToAssets) ТА ЗНЯТТЯ (withdraw)");
+        sb.AppendLine($"  Вартість акцій ДО compound.: {Num(report.PositionAfterReward.AssetsValue)} {assetSymbol}");
+        sb.AppendLine($"  Вартість акцій ПІСЛЯ.......: {Num(report.PositionAfterCompound.AssetsValue)} {assetSymbol}");
+        sb.AppendLine($"  Спалено акцій.........: {Num(report.Withdraw.Shares)}");
+        sb.AppendLine($"  Отримано активу.......: {Num(report.Withdraw.Assets)} {assetSymbol}");
+        sb.AppendLine($"  Транзакція............: {report.Withdraw.TransactionHash} (gas: {report.Withdraw.GasUsed})");
+
+        var profit = report.Withdraw.Assets - report.Deposit.Assets;
+        var percent = report.Deposit.Assets == 0m ? 0m : profit / report.Deposit.Assets * 100m;
+
+        sb.AppendLine();
+        sb.AppendLine($"  [OK] Внесено {Num(report.Deposit.Assets)}, знято {Num(report.Withdraw.Assets)} {assetSymbol}.");
+        sb.AppendLine($"       Прибуток від компаундингу: +{Num(profit)} {assetSymbol} (+{percent.ToString("0.####", Culture)}%).");
+        sb.AppendLine();
+        sb.AppendLine("Auto-compounding підтверджено: кількість акцій не змінилась, але totalAssets зріс,");
+        sb.AppendLine("тому кожна акція подорожчала, і інвестор може зняти більше, ніж поклав.");
+        sb.AppendLine();
+
+        return sb.ToString();
+    }
+
+    public string Render(StandReport report)
+    {
+        var sb = new StringBuilder();
+        var assetSymbol = report.TokenA.Symbol;
+
+        RenderInfrastructure(sb, report.Network, report.UserAddress, report.RouterAddress,
+            report.TokenA, report.TokenB, report.Pool, report.Vault);
+
+        Header(sb, "КРОК 3. ДЕПОЗИТ У СХОВИЩЕ (deposit)");
+        sb.AppendLine($"  Внесено...............: {Num(report.Deposit.Assets)} {assetSymbol}");
+        sb.AppendLine($"  Отримано акцій........: {Num(report.Deposit.Shares)}");
+        sb.AppendLine($"  Транзакція............: {report.Deposit.TransactionHash} (gas: {report.Deposit.GasUsed})");
+        RenderPosition(sb, report.PositionAfterDeposit, assetSymbol);
 
         sb.AppendLine();
         sb.AppendLine("Стенд готовий. Далі, у двох окремих терміналах:");
-        sb.AppendLine("  1) dotnet run -- --bot     (запустити бота-ліквідатора)");
-        sb.AppendLine("  2) dotnet run -- --crash   (бекдор: штучна неплатоспроможність позичальника)");
+        sb.AppendLine("  1) dotnet run -- --bot      (запустити бота-кіпера)");
+        sb.AppendLine("  2) dotnet run -- --donate   (імітація фарму: переказ винагороди на сховище)");
         sb.AppendLine();
 
         return sb.ToString();
     }
 
-    public string Render(CrashReport report)
+    public string Render(DonationReport report)
     {
         var sb = new StringBuilder();
 
-        Header(sb, "ШТУЧНА НЕПЛАТОСПРОМОЖНІСТЬ (бекдор simulateInsolvency — ЛИШЕ ДЛЯ ЛАБОРАТОРНОЇ)");
+        Header(sb, "ІМІТАЦІЯ ФАРМУ (прямий переказ винагороди на сховище)");
         sb.AppendLine($"  Мережа................: {report.Network}");
-        sb.AppendLine($"  StableEngine..........: {report.EngineAddress}");
-        sb.AppendLine($"  Позичальник...........: {report.OwnerAddress}");
-        sb.AppendLine($"  Ціна ETH/USD (oracle).: ${Num(report.EthUsdPrice)} (реальна, не змінювалась)");
-
+        sb.AppendLine($"  Сховище...............: {report.VaultAddress}");
+        sb.AppendLine($"  Надіслано.............: {Num(report.Reward.Amount)} {report.RewardSymbol}");
+        sb.AppendLine($"  Баланс винагороди.....: {Num(report.Reward.RewardBalanceInVault)} {report.RewardSymbol}");
+        sb.AppendLine($"  Транзакція............: {report.Reward.TransactionHash}");
         sb.AppendLine();
-        sb.AppendLine("  До втручання:");
-        RenderPosition(sb, report.Before, "USD");
-
-        sb.AppendLine();
-        sb.AppendLine($"  Зменшено заставу в реєстрі: {Num(report.Reduce.ReducedEth)} ETH ({Num(report.Percent)}%)");
-        sb.AppendLine($"  Транзакція............: {report.Reduce.TransactionHash} (gas: {report.Reduce.GasUsed})");
-
-        sb.AppendLine();
-        sb.AppendLine("  Після втручання:");
-        RenderPosition(sb, report.After, "USD");
-
-        sb.AppendLine();
-        if (report.After.HealthFactor is { } hf && hf < 1m)
-        {
-            sb.AppendLine("  [OK] HF < 1: позиція неплатоспроможна — бот-ліквідатор має її підхопити.");
-        }
-        else
-        {
-            sb.AppendLine("  [УВАГА] HF все ще ≥ 1: збільште Lab6Settings:CrashCollateralPercent.");
-        }
+        sb.AppendLine("  Бот-кіпер має помітити винагороду й викликати compound().");
         sb.AppendLine();
 
         return sb.ToString();
     }
 
-    private static void RenderPosition(StringBuilder sb, PositionSnapshot position, string symbol)
+    private static void RenderInfrastructure(
+        StringBuilder sb, string network, string user, string router,
+        TokenDeploymentResult tokenA, TokenDeploymentResult tokenB,
+        LiquidityResult? pool, VaultDeploymentResult vault)
     {
-        sb.AppendLine("  Позиція:");
-        sb.AppendLine($"    Застава.............: {Num(position.CollateralEth)} ETH (${Num(position.CollateralUsd)})");
-        sb.AppendLine($"    Борг................: {Num(position.DebtUsd)} {symbol}");
-        sb.AppendLine($"    Health Factor.......: {HealthFactor(position.HealthFactor)}");
+        Header(sb, "МЕРЕЖА ТА АКАУНТ");
+        sb.AppendLine($"  Мережа................: {network}");
+        sb.AppendLine($"  Інвестор..............: {user}");
+        sb.AppendLine($"  Router (зовнішній DEX): {router}");
+
+        Header(sb, "КРОК 1. ТОКЕНИ ТА ПУЛ ЛІКВІДНОСТІ У ЗОВНІШНЬОМУ DEX");
+        RenderToken(sb, tokenA, "Токен A (базовий актив)");
+        RenderToken(sb, tokenB, "Токен B (винагорода)");
+        if (pool is null)
+        {
+            sb.AppendLine("  Пул A/B...............: уже наповнений раніше (addLiquidity пропущено)");
+        }
+        else
+        {
+            sb.AppendLine($"  Пул A/B...............: {Num(pool.AmountA)} {tokenA.Symbol} + {Num(pool.AmountB)} {tokenB.Symbol}");
+            sb.AppendLine($"    Транзакція..........: {pool.TransactionHash} (gas: {pool.GasUsed})");
+        }
+
+        Header(sb, "КРОК 2. РОЗГОРТАННЯ СХОВИЩА (AutoCompoundVault)");
+        sb.AppendLine($"  Адреса сховища........: {vault.Address}");
+        sb.AppendLine($"  Статус................: {(vault.WasAlreadyDeployed ? "перевикористано з файлу стану" : "розгорнуто щойно")}");
+        if (vault.TransactionHash is not null)
+        {
+            sb.AppendLine($"  Транзакція деплою.....: {vault.TransactionHash}");
+        }
     }
 
-    private static string HealthFactor(decimal? value) =>
-        value is null ? "∞ (боргу немає)" : value.Value.ToString("0.####", Culture);
+    private static void RenderToken(StringBuilder sb, TokenDeploymentResult token, string label)
+    {
+        sb.AppendLine($"  {label}: {token.Name} ({token.Symbol})");
+        sb.AppendLine($"    Адреса..............: {token.Address}");
+        sb.AppendLine($"    Статус..............: {(token.WasAlreadyDeployed ? "перевикористано" : "розгорнуто щойно")}");
+    }
 
-    private static string Status(bool wasAlreadyDeployed) =>
-        wasAlreadyDeployed ? "перевикористано з файлу стану" : "розгорнуто щойно";
+    private static void RenderPosition(StringBuilder sb, VaultSnapshot position, string assetSymbol)
+    {
+        sb.AppendLine("  Стан сховища та позиції:");
+        sb.AppendLine($"    Акції інвестора.....: {Num(position.Shares)}");
+        sb.AppendLine($"    convertToAssets.....: {Num(position.AssetsValue)} {assetSymbol}");
+        sb.AppendLine($"    totalAssets.........: {Num(position.TotalAssets)} {assetSymbol}");
+        sb.AppendLine($"    totalSupply акцій...: {Num(position.TotalShares)}");
+        sb.AppendLine($"    Ціна 1 акції........: {Num(position.SharePrice)} {assetSymbol}");
+    }
 
     private static void Header(StringBuilder sb, string title)
     {

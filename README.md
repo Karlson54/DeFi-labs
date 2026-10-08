@@ -1,71 +1,65 @@
-# Лабораторна робота №6 — Децентралізовані оракули та Off-chain агент
+# Лабораторна робота №7 — Сховище (Vault) з автоматичним реінвестуванням винагород
 
-**Тема.** Інтеграція децентралізованих оракулів (Chainlink) та розробка автономного
-off-chain агента (Keeper / Liquidator) для підтримки платоспроможності кредитного протоколу.
+**Тема.** Розробка смарт-контракту сховища (Vault) для автоматизованого управління активами
+та реінвестування винагород (Yield Aggregator, Auto-compounding).
 **Виконав:** Рубан Андрій, група ПДМ-61.
 
-Клієнт — консольний застосунок C# (.NET 8) + Nethereum. Він сам розгортає стейблкоїн
-`RubanUSD` та кредитне ядро `StableEngine` (з реальним оракулом Chainlink ETH/USD),
-створює боргову позицію з Health Factor ≈ 1.1, а окремий режим `--bot` запускає
-бота-ліквідатора, який автономно ліквідує неплатоспроможну позицію.
+Клієнт — консольний застосунок C# (.NET 8) + Nethereum, повністю самодостатній:
+сам випускає два ERC-20 токени, наповнює пул у зовнішньому DEX (Uniswap V2 Router з лаб. №4),
+розгортає `AutoCompoundVault`, відтворює життєвий цикл інвестора, а режим `--bot`
+запускає off-chain кіпера, який автономно викликає `compound()`.
 
 ---
 
-## 1. Ідея
+## 1. Ідея протоколу
 
-У лабораторній №5 ціна ETH була мок-змінною, яку адміністратор міняв вручну. Тепер:
+Фарм-протоколи виплачують винагороду сторонніми токенами. Щоб заробити складний відсоток,
+її треба забрати, продати за базовий актив і знову покласти на депозит — вручну це збиткове
+через газ. Сховище робить це для всіх користувачів одразу:
 
-1. **Ціну дає Chainlink Data Feed.** `StableEngine.getEthUsdPrice()` читає
-   `latestRoundData()`, відкидає від'ємну чи застарілу ціну й масштабує її з 8 знаків
-   до 18 (множення на `1e10`).
-2. **Додано примусову ліквідацію.** Якщо `HF < 1`, будь-хто може викликати
-   `liquidate(user)`: погасити борг власними стейблкоїнами й отримати заставу
-   з премією 10% (`LIQUIDATION_BONUS`).
-3. **Додано бота.** Контракти не виконуються самі, тому за `HF` стежить зовнішній агент.
+1. Користувач вносить Токен A і отримує **акції** (`vRUBC`) — свою частку в загальному пулі.
+2. На сховище надходить винагорода (Токен B).
+3. Кіпер викликає `compound()`: уся винагорода одним обміном конвертується в Токен A
+   через Router і залишається на балансі сховища.
+4. Кількість акцій не змінилась, а `totalAssets` зросла — кожна акція подорожчала.
+
+### Математика акцій
 
 ```
-HF = (Collateral × 100 / CR) / Debt
-HF ≥ 1  — позиція безпечна;   HF < 1 — позиція підлягає ліквідації
+Перший депозит:  shares = assets − MINIMUM_SHARES   (MINIMUM_SHARES акцій спалюються)
+Далі:            shares = assets × totalSupply / totalAssets
+Зняття:          assets = shares × totalAssets / totalSupply
+Ціна акції:      price  = totalAssets / totalSupply
 ```
 
 ### Архітектура
 
 ```
- Chainlink ETH/USD Data Feed  (Sepolia: 0x694A...5306)
-          │ latestRoundData()  — ціна, 8 знаків
-          ▼
- StableEngine ── getEthUsdPrice() ×1e10 → 18 знаків; перевірка свіжості
-   │  depositCollateral / mintStablecoin / burnStablecoin / withdrawCollateral
-   │  liquidate(user)            ◄── транзакція бота, якщо HF < 1
-   │  simulateInsolvency(...)    ◄── ЛАБОРАТОРНИЙ бекдор (onlyOwner)
-   │ mint / burn (onlyOwner)
+Інвестор (EOA)
+   │ approve → deposit(assets) / withdraw(shares)
    ▼
- StableCoin (ERC-20 + Ownable, власник = StableEngine)
+AutoCompoundVault (ERC-20 vTokenA)  ◄── будь-який кіпер: compound()
+   │ totalAssets = tokenA.balanceOf(vault)
+   │ винагорода: tokenB.balanceOf(vault)  ◄── прямий переказ / фарм-протокол
+   │ swapExactTokensForTokens([B → A], to = vault)
+   ▼
+Uniswap V2 Router  ──►  пул A/B (створюється клієнтом через addLiquidity)
 
- Off-chain:
- dotnet run -- --bot  →  LiquidatorBot (цикл опитування, 12 с)
-                          └ LiquidatorService (гаманець ліквідатора)
-                              getHealthFactor (view, без газу) → HF < 1? → approve → liquidate
+Off-chain:
+dotnet run -- --bot → KeeperBot (цикл 12 с)
+                      └ rewardToken.balanceOf(vault) ≥ порогу? → vault.compound()
 ```
-
-### Механіка ліквідації
-
-```
-debt              = stablecoinMinted[user]
-baseCollateral    = debt / ціна_ETH                 (ETH, що точно покриває борг)
-collateralToSeize = baseCollateral × (100 + 10) / 100
-```
-
-Контракт обнуляє борг, зменшує заставу позичальника, забирає й спалює стейблкоїни
-ліквідатора, а потім переказує йому `collateralToSeize` ETH. Порядок дій —
-Checks-Effects-Interactions, плюс `ReentrancyGuard`.
 
 ### Інваріанти безпеки
 
-- Ліквідація можлива лише при `HF < 1`; самоліквідація заборонена.
-- Застаріла (`MAX_PRICE_AGE`) або нульова ціна оракула дає revert, а не розрахунок за хибним курсом.
-- `simulateInsolvency` доступна лише власнику й існує тільки для лабораторної.
-  **У реальному протоколі така функція — бекдор, її необхідно видаляти.**
+- **Checks-Effects-Interactions:** у `deposit` спершу `_mint`, потім `transferFrom`;
+  у `withdraw` спершу `_burn`, потім `transfer`. Додатково `ReentrancyGuard`.
+- **immutable:** `asset`, `rewardToken`, `router` фіксуються в конструкторі й не підмінюються.
+- **Захист першого депозиту:** `MINIMUM_SHARES = 1000` акцій назавжди спалюються на `0xdead`.
+- **Округлення на користь сховища:** усі ділення округлюють вниз.
+- **Отримувач обміну — `address(this)`:** навіть зловмисний виклик `compound()` не виводить кошти назовні.
+- **Спрощення (навчальні):** `amountOutMin = 1` у `compound()`. У продакшені мінімум рахують
+  від оракула/TWAP, інакше можливі sandwich-атаки (MEV).
 
 ---
 
@@ -74,111 +68,127 @@ Checks-Effects-Interactions, плюс `ReentrancyGuard`.
 ```
 DeFi-labs/
 ├── contracts/
-│   ├── StableCoin.sol              # ERC-20 + Ownable (без змін відносно №5)
-│   ├── StableEngine.sol            # + Chainlink, liquidate, simulateInsolvency
+│   ├── AssetToken.sol                  # ERC-20 (з лаб. №4, без змін)
+│   ├── AutoCompoundVault.sol           # сховище з автокомпаундингом
+│   ├── interfaces/
+│   │   └── IUniswapV2Router02.sol      # інтерфейс Router-а (з лаб. №4)
 │   └── artifacts/
-│       ├── StableCoin.json
-│       └── StableEngine.json       # ПЕРЕКОМПІЛЮВАТИ (нова версія контракту)
+│       ├── AssetToken.json             # abi + bytecode (з лаб. №4)
+│       └── AutoCompoundVault.json      # ← вставити BYTECODE з Remix
 ├── Models/
 │   ├── Web3Settings.cs
-│   ├── Lab6Settings.cs             # параметри сценарію, оракула, бота
+│   ├── Lab7Settings.cs                 # параметри сценарію, пулу, бота
 │   ├── DeploymentState.cs
 │   ├── ContractArtifact.cs
-│   ├── ScenarioResults.cs          # результати кроків, звіти, результат ліквідації
+│   ├── VaultResults.cs                 # результати кроків і звіти
 │   └── Contracts/
-│       ├── StableCoinDefinition.cs
-│       └── StableEngineDefinition.cs
+│       ├── AssetTokenDefinition.cs
+│       ├── UniswapRouterDefinition.cs
+│       └── VaultDefinition.cs
 ├── Services/
-│   ├── Web3Factory.cs              # основний гаманець + окремий клієнт ліквідатора
+│   ├── Web3Factory.cs
 │   ├── ContractArtifactProvider.cs
 │   ├── DeploymentStateStore.cs
-│   ├── WalletService.cs            # баланс і переказ ETH
-│   ├── StablecoinService.cs
-│   ├── StableEngineService.cs      # деплой, депозит, емісія до цільового HF, бекдор
-│   ├── LiquidatorService.cs        # дії гаманця ліквідатора (HF, approve, liquidate)
-│   ├── LiquidatorBot.cs            # автономний цикл моніторингу
-│   ├── ScenarioRunner.cs           # підготовка стенду та виклик бекдора
+│   ├── TokenService.cs                 # деплой, approve, balanceOf, transfer
+│   ├── RouterService.cs                # addLiquidity у зовнішньому DEX
+│   ├── VaultService.cs                 # deposit / withdraw / compound / знімок стану
+│   ├── ScenarioRunner.cs               # оркестрація життєвого циклу інвестора
+│   ├── KeeperBot.cs                    # автономний кіпер
 │   └── ConsoleReportRenderer.cs
-├── Program.cs                      # DI, режими запуску, обробка помилок
+├── Program.cs                          # DI, режими запуску, обробка помилок
 ├── appsettings.example.json
 ├── DeFi.csproj
-└── deployment-state-lab6.json      # генерується автоматично
+└── deployment-state-lab7.json          # генерується автоматично
 ```
-
-> Файл `Models/Lab6Settings.cs` слід видалити: клас `StablecoinSettings` тепер у `Lab6Settings.cs`.
 
 ---
 
-## 3. Запуск (Sepolia)
+## 3. Запуск
 
-### Крок 0. Підготовка
+### Крок 0. Мережа з Uniswap V2
 
-- Два **тестових** гаманці: позичальник (він же власник протоколу) і ліквідатор.
-  Ключі від гаманців з реальними коштами використовувати не можна.
-- Тестовий ETH у Sepolia на позичальнику: приблизно 0.05 ETH
-  (деплой + застава 0.01 + 0.02 ETH, які піднімуться ліквідатору на газ).
-- RPC-endpoint Sepolia (Infura/Alchemy).
+Як і в лаб. №4: публічний форк Uniswap V2 у Sepolia (адреса Router-а — з документації форку
+або від викладача) або локальний Hardhat-форк, де Uniswap V2 уже розгорнуто.
 
-### Крок 1. Компіляція контрактів
+### Крок 1. Компіляція контракту
 
-1. https://remix.ethereum.org → створити `StableCoin.sol` і `StableEngine.sol` в одній теці.
-2. Solidity Compiler → `0.8.24+` → Compile (OpenZeppelin v5 та `@chainlink/contracts`
-   Remix підтягне з npm автоматично; локально в Hardhat/Foundry: `npm install @chainlink/contracts`).
-3. З Compilation Details скопіювати `ABI` та `BYTECODE` (поле `object`) у
-   `contracts/artifacts/StableEngine.json`. `StableCoin.json` лишається без змін.
+1. https://remix.ethereum.org → створити `AutoCompoundVault.sol` та `interfaces/IUniswapV2Router02.sol`.
+2. Solidity Compiler → `0.8.24+` → Compile (потрібен OpenZeppelin v5).
+3. З Compilation Details скопіювати `BYTECODE` (поле `object`) у ключ `bytecode`
+   файлу `contracts/artifacts/AutoCompoundVault.json`.
+4. `contracts/artifacts/AssetToken.json` скопіювати з лаб. №4 без змін.
 
 ### Крок 2. Конфігурація
 
 Скопіювати `appsettings.example.json` → `appsettings.json` (файл у `.gitignore`), заповнити:
 
-- `Web3Settings:RpcUrl`, `ChainId` = `11155111`, `PrivateKey` — ключ позичальника;
-- `Lab6Settings:LiquidatorPrivateKey` — ключ **іншого** гаманця (ліквідатор);
-- `Lab6Settings:PriceFeedAddress` — `0x694AA1769357215DE4FAC081bf1f309aDC325306` (ETH/USD, Sepolia).
+- `Web3Settings:RpcUrl`, `ChainId`, `PrivateKey` — **тестовий** гаманець з ETH;
+- `Lab7Settings:RouterAddress` — адреса Router-а обраного DEX;
+- за потреби `DepositAmount` (1000), `RewardAmount` (100), `RewardThreshold`.
 
-Необов'язково, для локальної перевірки: `npx hardhat node --fork <SEPOLIA_RPC>` і `ChainId` = `31337`.
-Адреса Data Feed на форку та сама.
-
-### Крок 3. Підготовка стенду
+### Крок 3. Життєвий цикл інвестора (контрольне завдання)
 
 ```bash
 dotnet restore
 dotnet run
 ```
 
-Скрипт розгортає `RubanUSD` і `StableEngine` (з адресою оракула в конструкторі), передає
-ядру власність на токен, вносить заставу й випускає стейблкоїни так, щоб `HF ≈ 1.1`.
-Потім він докидає ліквідатору ETH на газ і стейблкоїни для викупу боргу.
-Повторний запуск безпечний: наявні контракти та застава перевикористовуються.
+Сценарій:
 
-### Крок 4. Бот-ліквідатор (термінал №1)
+1. розгортає токени A/B (якщо їх ще немає) та наповнює пул A/B у зовнішньому DEX;
+2. розгортає `AutoCompoundVault`;
+3. вносить 1000 Токена A, виводить кількість отриманих акцій;
+4. надсилає 100 Токена B прямим ERC-20 переказом на сховище (імітація фарму);
+5. викликає `compound()`: Токен B продається за Токен A через Router;
+6. виводить `convertToAssets(баланс акцій)` до та після, знімає акції й доводить,
+   що знято більше, ніж внесено.
+
+Адреси зберігаються у `deployment-state-lab7.json`; повторний запуск не витрачає газ
+на повторний деплой.
+
+### Крок 4 (необов'язково). Бот-кіпер
 
 ```bash
-dotnet run -- --bot
+dotnet run -- --stand      # підготовка стенду: деплой, пул, депозит (без compound)
+dotnet run -- --bot        # термінал №1: бот опитує balanceOf(vault) кожні 12 с
+dotnet run -- --donate     # термінал №2: імітація фарму — переказ винагороди
 ```
 
-Бот щоразу опитує `getHealthFactor` (безкоштовний view-запит) і пише в консоль:
-`Позиція 0x... | HF: 1.1`.
-
-### Крок 5. Штучний крах (термінал №2)
-
-```bash
-dotnet run -- --crash
-```
-
-Бекдор `simulateInsolvency` зменшує `collateralDeposited` позичальника на
-`CrashCollateralPercent` (20%), тож `HF = 1.1 × 0.8 = 0.88`. У терміналі бота:
+Приклад логу бота:
 
 ```
-[12:04:31] Позиція 0x... | HF: 0.88
-[12:04:31] [УВАГА] Виявлено неплатоспроможну позицію 0x...! Ініціалізація ліквідації...
-[12:04:55] [УСПІХ] Позицію ліквідовано у блоці 6543210. Tx: 0x...
+[12:04:19] Сховище 0x... | винагорода: 0 MFIAT
+[12:04:31] Сховище 0x... | винагорода: 100 MFIAT
+[12:04:31] [УВАГА] Винагорода перевищила поріг (10 MFIAT). Виклик compound()...
+[12:04:55] [УСПІХ] Реінвестування виконано. Tx: 0x...
+           Продано винагороди.: 100 MFIAT
+           Отримано активу....: 99.5005
+           totalAssets........: 1000 -> 1099.5005
+           Ціна акції.........: 1 -> 1.0995
 ```
 
-Це і є момент спрацювання бота для звіту.
+### Приклад виводу (скорочено, значення орієнтовні)
 
-> **Обмеження:** щоб ліквідація була прибутковою без втрат застави, треба
-> `CrashCollateralPercent` ≲ 33% при `TargetHealthFactor = 1.1`
-> (застава мусить покрити борг + 10% премії).
+```
+КРОК 3. ДЕПОЗИТ У СХОВИЩЕ (deposit)
+  Внесено...............: 1000 RUBC
+  Отримано акцій........: 1000
+КРОК 4. ІМІТАЦІЯ ВИНАГОРОДИ
+  Надіслано.............: 100 MFIAT
+  Ціна 1 акції..........: 1 RUBC        ← не змінилась
+КРОК 5. РЕІНВЕСТУВАННЯ (compound)
+  Отримано активу.......: ≈99.5 RUBC
+  totalAssets...........: 1000 -> ≈1099.5 RUBC
+КРОК 6. ПЕРЕВІРКА ВАРТОСТІ АКЦІЙ
+  Вартість акцій ДО compound.: 1000 RUBC
+  Вартість акцій ПІСЛЯ.......: ≈1099.5 RUBC
+  [OK] Внесено 1000, знято ≈1099.5 RUBC.
+```
+
+Пояснення до цифр: при першому депозиті 1000 wei акцій спалюються (`MINIMUM_SHARES`),
+тому інвестор отримує на 10⁻¹⁵ акції менше (у консолі це округлюється до 8 знаків).
+Прибуток залежить від глибини пулу: винагорода 100 B у пулі 50 000 / 50 000 з комісією 0.3%
+обмінюється приблизно на 99.5 A.
 
 ---
 
@@ -186,22 +196,88 @@ dotnet run -- --crash
 
 | Вимога | Реалізація |
 |---|---|
-| Розгорнути контракти в Sepolia з адресою оракула ETH/USD | `StableEngineService.DeployAsync` → конструктор `StableEngine(stablecoin_, priceFeed_)` |
-| Депозит і емісія, HF ≈ 1.1 | `ScenarioRunner` → `MintToHealthFactorAsync` (борг = `maxDebt / 1.1`) |
-| Бот-ліквідатор (C#/Nethereum) | `LiquidatorBot` + `LiquidatorService`, режим `--bot` |
-| Бекдор для штучного краху | `StableEngine.simulateInsolvency` (onlyOwner), режим `--crash` |
-| Фіксація спрацювання бота | лог терміналу + хеш транзакції `liquidate` у Sepolia Etherscan |
+| Розгорнути `AutoCompoundVault` з адресами двох токенів і Router-а | `VaultService.DeployAsync` → конструктор `(asset_, rewardToken_, router_)` |
+| Імітація винагороди прямим переказом Токена B | `ScenarioRunner.TransferRewardAsync` (`ERC-20 transfer` на адресу сховища) |
+| Депозит 1000 одиниць, вивід отриманих акцій | `DepositStepAsync` (акції = приріст балансу `balanceOf`) |
+| Виклик `compound()`, що продає Токен B за Токен A | `VaultService.CompoundAsync` |
+| Перевірка `convertToAssets(баланс акцій)` | `VaultService.GetSnapshotAsync`, звіт кроку 6 |
+| Доказ: знімаємо більше, ніж поклали | `withdraw` + перевірка `Withdraw.Assets > Deposit.Assets` |
+| Off-chain автоматизація (Keeper) | `KeeperBot`, режим `--bot` |
 
-**У звіті:** лістинг `StableEngine.sol`, код бота (`LiquidatorBot.cs`, `LiquidatorService.cs`),
-скриншот терміналу бота з `[УСПІХ]` та хеш транзакції ліквідації.
+**У звіті:** лістинг `AutoCompoundVault.sol`, код клієнта (`ScenarioRunner.cs`, `VaultService.cs`,
+`KeeperBot.cs`) та скриншоти консолі (кроки 3, 4, 5, 6 — зміна вартості акцій).
 
 ---
 
-## 5. Технологічний стек
+## 5. Контрольні запитання
+
+**Чому архітектура токенізованих сховищ (Vaults) передбачає видачу користувачам пропорційних акцій (Shares), а не просто веде облік їхніх балансів у змінних (як у банківській базі даних)?**
+
+Баланс сховища постійно змінюється без участі користувачів: після кожного `compound()`
+`totalAssets` зростає. Якби кожен мав окрему змінну з балансом, довелося б оновлювати
+записи всіх інвесторів — це O(n) операцій і необмежені витрати газу. Акції зберігають
+лише *частку*, а зростання вартості відбувається однією зміною знаменника `totalAssets`
+(складність O(1)). Є й інші переваги:
+- нові вкладники не отримують вже зароблену винагороду, бо купують акції за поточною ціною;
+- акції — звичайний ERC-20 токен, який можна передавати, використовувати як заставу
+  (композитність), лістити на DEX;
+- обліковий інваріант простий: `Σ shares = totalSupply`.
+
+**Поясніть, яким чином виконання функції `compound()` призводить до подорожчання токена-акції. Наведіть математичний приклад.**
+
+`compound()` перетворює токени винагороди на базовий актив і залишає його на балансі
+сховища, але **не емітує нових акцій**. Ціна акції `price = totalAssets / totalSupply`:
+чисельник зростає, знаменник той самий.
+
+Приклад: інвестор вніс 1000 A і отримав 1000 акцій. До compound: `price = 1000 / 1000 = 1`.
+На сховище надійшло 100 B, обмін дав 99.5 A. Після compound: `totalAssets = 1099.5`,
+`totalSupply = 1000`, тому `price = 1099.5 / 1000 = 1.0995`. Зняття 1000 акцій дає
+`1000 × 1099.5 / 1000 = 1099.5 A` замість початкових 1000 A. Прибуток 99.5 A отримано без жодної
+додаткової дії інвестора. До compound токени B не рахувалися в `totalAssets()`, тому
+ціна акції не змінювалась (це видно у кроці 4 виводу).
+
+**Чому функцію `compound()` не роблять внутрішньою (прихованою), а залишають відкритою (`external`), дозволяючи викликати її будь-якому користувачеві мережі?**
+
+Контракт не вміє виконуватися за розкладом — його має хтось викликати та оплатити газ.
+Якщо зробити функцію `internal`, її не зможе викликати жоден зовнішній кіпер, а
+реінвестування залежало б від довіреної адміністративної ролі (єдина точка відмови та
+централізації). Відкрита функція безпечна, бо:
+- вихід обміну завжди надходить на `address(this)`, тому викликач не може привласнити кошти;
+- виклик із малою винагородою марно витрачає лише газ самого викликача (тому боти мають поріг);
+- будь-який учасник (бот проєкту, сам інвестор, сторонній кіпер) може підтримувати роботу
+  протоколу — це децентралізація та стійкість до зупинки одного оператора.
+
+Єдиний ризик — sandwich-атака на обмін. Його знімає динамічний `amountOutMin`
+(від оракула/TWAP), чого в навчальній версії свідомо немає.
+
+**У чому полягає вразливість першого депозиту (First Deposit Inflation Attack) у базових реалізаціях сховищ, і як порожня емісія акцій може захистити від неї?**
+
+У базовій реалізації перший депозит дає акції 1:1, а наступні — за формулою
+`shares = assets × totalSupply / totalAssets` з округленням вниз. Атакуючий:
+1. вносить 1 wei і отримує 1 акцію;
+2. напряму переказує на сховище (мимо `deposit`) 1000 токенів: `totalAssets = 1000e18 + 1`,
+   `totalSupply = 1`;
+3. жертва вносить 1999e18: `shares = 1999e18 × 1 / (1000e18 + 1) = 1` (округлення вниз від 1.999);
+4. тепер у сховищі ≈ 2999e18, а акцій дві (по одній у кожного). Атакуючий забирає половину,
+   тобто ≈ 1499e18 при власних витратах 1000e18, а жертва втратила ≈ 500e18.
+
+Захист — «порожня» емісія: при першому депозиті `MINIMUM_SHARES = 1000` акцій
+спалюються на `0xdead` і ніколи не можуть бути викуплені. Тоді `totalSupply` ніколи
+не буває малим, а частка атакуючого не перевищує `assets − 1000` акцій. Щоб округлити
+акції жертви до нуля, донат мав би бути у тисячі разів більшим за внесок жертви (стаття
+витрат зростає на кілька порядків), а частину цього донату отримали б «мертві» акції.
+Атака стає економічно невигідною. Стандарт ERC-4626 в OpenZeppelin розв'язує ту саму
+проблему «віртуальними» акціями та активами (decimals offset). `require(shares > 0)`
+у `deposit` додатково не дозволяє внести кошти й отримати нуль акцій.
+
+---
+
+## 6. Технологічний стек
 
 | Шар | Технологія |
 |---|---|
-| Смарт-контракти | Solidity 0.8.24, OpenZeppelin v5 (ERC20, Ownable, ReentrancyGuard), Chainlink `AggregatorV3Interface` |
-| Мережа | Sepolia (опційно — Hardhat-форк Sepolia) |
-| Клієнт та бот | C# (.NET 8), Nethereum 4.29, Microsoft.Extensions (DI, Options, Configuration) |
-| Стан деплою | `deployment-state-lab6.json` |
+| Смарт-контракти | Solidity 0.8.24, OpenZeppelin v5 (ERC20, SafeERC20, ReentrancyGuard) |
+| Зовнішній протокол | Uniswap V2 Router02 (композитність, лаб. №4) |
+| Мережа | Sepolia або Hardhat-форк із розгорнутим Uniswap V2 |
+| Клієнт та кіпер | C# (.NET 8), Nethereum 4.29, Microsoft.Extensions (DI, Options, Configuration) |
+| Стан деплою | `deployment-state-lab7.json` |
