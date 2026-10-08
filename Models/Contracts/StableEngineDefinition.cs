@@ -13,8 +13,8 @@ public class StableEngineDeployment : ContractDeploymentMessage
     [Parameter("address", "stablecoin_", 1)]
     public string Stablecoin { get; set; } = string.Empty;
 
-    [Parameter("uint256", "initialPrice_", 2)]
-    public BigInteger InitialPrice { get; set; }
+    [Parameter("address", "priceFeed_", 2)]
+    public string PriceFeed { get; set; } = string.Empty;
 }
 
 [Function("depositCollateral")]
@@ -43,11 +43,22 @@ public class WithdrawCollateralFunction : FunctionMessage
     public BigInteger Amount { get; set; }
 }
 
-[Function("setMockEthUsdPrice")]
-public class SetMockEthUsdPriceFunction : FunctionMessage
+[Function("liquidate")]
+public class LiquidateFunction : FunctionMessage
 {
-    [Parameter("uint256", "newPrice", 1)]
-    public BigInteger NewPrice { get; set; }
+    [Parameter("address", "user", 1)]
+    public string User { get; set; } = string.Empty;
+}
+
+// Лабораторний бекдор: примусове зменшення застави в реєстрі.
+[Function("simulateInsolvency")]
+public class SimulateInsolvencyFunction : FunctionMessage
+{
+    [Parameter("address", "user", 1)]
+    public string User { get; set; } = string.Empty;
+
+    [Parameter("uint256", "amount", 2)]
+    public BigInteger Amount { get; set; }
 }
 
 [Function("getHealthFactor", "uint256")]
@@ -64,6 +75,11 @@ public class GetCollateralValueInUsdFunction : FunctionMessage
     public string User { get; set; } = string.Empty;
 }
 
+[Function("getEthUsdPrice", "uint256")]
+public class GetEthUsdPriceFunction : FunctionMessage
+{
+}
+
 [Function("collateralDeposited", "uint256")]
 public class CollateralDepositedFunction : FunctionMessage
 {
@@ -76,11 +92,6 @@ public class StablecoinMintedFunction : FunctionMessage
 {
     [Parameter("address", "", 1)]
     public string User { get; set; } = string.Empty;
-}
-
-[Function("mockEthUsdPrice", "uint256")]
-public class MockEthUsdPriceFunction : FunctionMessage
-{
 }
 
 [Function("COLLATERALIZATION_RATIO", "uint256")]

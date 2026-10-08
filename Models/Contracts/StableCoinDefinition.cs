@@ -45,3 +45,13 @@ public class StableCoinApproveFunction : FunctionMessage
     [Parameter("uint256", "value", 2)]
     public BigInteger Amount { get; set; }
 }
+
+[Function("transfer", "bool")]
+public class StableCoinTransferFunction : FunctionMessage
+{
+    [Parameter("address", "to", 1)]
+    public string To { get; set; } = string.Empty;
+
+    [Parameter("uint256", "value", 2)]
+    public BigInteger Amount { get; set; }
+}

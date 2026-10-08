@@ -1,30 +1,25 @@
 using System.Numerics;
-using System.Text.RegularExpressions;
 using DeFi.Models;
 using DeFi.Models.Contracts;
 using Microsoft.Extensions.Options;
-using Nethereum.ABI.FunctionEncoding;
 using Nethereum.Contracts;
-using Nethereum.JsonRpc.Client;
 using Nethereum.Web3;
 
 namespace DeFi.Services;
 
 public interface IStableEngineService
 {
-    Task<EngineDeploymentResult> DeployAsync(string stablecoinAddress, decimal initialEthUsdPrice, CancellationToken cancellationToken = default);
+    Task<EngineDeploymentResult> DeployAsync(string stablecoinAddress, string priceFeedAddress, CancellationToken cancellationToken = default);
 
-    Task EnsurePriceAsync(string engineAddress, decimal ethUsdPrice, CancellationToken cancellationToken = default);
+    Task<decimal> GetEthUsdPriceAsync(string engineAddress, CancellationToken cancellationToken = default);
 
     Task<DepositResult> DepositCollateralAsync(string engineAddress, decimal amountEth, CancellationToken cancellationToken = default);
 
     Task<PositionSnapshot> GetPositionAsync(string engineAddress, string user, CancellationToken cancellationToken = default);
 
-    Task<MintResult> MintMaxAsync(string engineAddress, string user, CancellationToken cancellationToken = default);
+    Task<MintResult> MintToHealthFactorAsync(string engineAddress, string user, decimal targetHealthFactor, CancellationToken cancellationToken = default);
 
-    Task<BurnResult> BurnAsync(string engineAddress, BigInteger amountWei, CancellationToken cancellationToken = default);
-
-    Task<WithdrawAttemptResult> TryWithdrawCollateralAsync(string engineAddress, decimal amountEth, CancellationToken cancellationToken = default);
+    Task<InsolvencyResult> SimulateInsolvencyAsync(string engineAddress, string user, decimal percent, CancellationToken cancellationToken = default);
 }
 
 public sealed class StableEngineService : IStableEngineService
@@ -32,6 +27,7 @@ public sealed class StableEngineService : IStableEngineService
     private const int Decimals = 18;
 
     private const int RatioDenominator = 100;
+    private const int BasisPoints = 10_000;
     private static readonly BigInteger Precision = BigInteger.Pow(10, Decimals);
 
     private static readonly BigInteger InfinityThreshold = BigInteger.Pow(10, 30);
@@ -47,14 +43,14 @@ public sealed class StableEngineService : IStableEngineService
         _timeout = TimeSpan.FromSeconds(options.Value.TransactionTimeoutSeconds);
     }
 
-    public async Task<EngineDeploymentResult> DeployAsync(string stablecoinAddress, decimal initialEthUsdPrice, CancellationToken cancellationToken = default)
+    public async Task<EngineDeploymentResult> DeployAsync(string stablecoinAddress, string priceFeedAddress, CancellationToken cancellationToken = default)
     {
         var artifact = await _artifacts.GetAsync("StableEngine", cancellationToken);
 
         var deployment = new StableEngineDeployment(artifact.Bytecode)
         {
             Stablecoin = stablecoinAddress,
-            InitialPrice = Web3.Convert.ToWei(initialEthUsdPrice, Decimals)
+            PriceFeed = priceFeedAddress
         };
 
         var receipt = await _web3Factory.Client.Eth
@@ -66,37 +62,19 @@ public sealed class StableEngineService : IStableEngineService
         {
             throw new InvalidOperationException(
                 "Розгортання StableEngine відхилено мережею (status = 0). " +
-                "Перевірте адресу стейблкоїна та коректність байткоду артефакту.");
+                "Перевірте адреси стейблкоїна й оракула та те, що в артефакті лежить байткод " +
+                "саме Lab6-версії контракту (конструктор приймає stablecoin_ та priceFeed_).");
         }
 
         return new EngineDeploymentResult(
-            receipt.ContractAddress, stablecoinAddress, initialEthUsdPrice,
+            receipt.ContractAddress, stablecoinAddress, priceFeedAddress,
             WasAlreadyDeployed: false, receipt.TransactionHash);
     }
 
-    public async Task EnsurePriceAsync(string engineAddress, decimal ethUsdPrice, CancellationToken cancellationToken = default)
+    public async Task<decimal> GetEthUsdPriceAsync(string engineAddress, CancellationToken cancellationToken = default)
     {
-        var expected = Web3.Convert.ToWei(ethUsdPrice, Decimals);
-
-        var current = await _web3Factory.Client.Eth
-            .GetContractQueryHandler<MockEthUsdPriceFunction>()
-            .QueryAsync<BigInteger>(engineAddress, new MockEthUsdPriceFunction())
-            .WaitAsync(_timeout, cancellationToken);
-
-        if (current == expected)
-        {
-            return;
-        }
-
-        var receipt = await _web3Factory.Client.Eth
-            .GetContractTransactionHandler<SetMockEthUsdPriceFunction>()
-            .SendRequestAndWaitForReceiptAsync(engineAddress, new SetMockEthUsdPriceFunction { NewPrice = expected })
-            .WaitAsync(_timeout, cancellationToken);
-
-        if (receipt.Status?.Value != 1)
-        {
-            throw new InvalidOperationException("setMockEthUsdPrice відхилено мережею: змінювати ціну може лише власник рушія.");
-        }
+        var priceWei = await QueryAsync(engineAddress, new GetEthUsdPriceFunction(), cancellationToken);
+        return Web3.Convert.FromWei(priceWei, Decimals);
     }
 
     public async Task<DepositResult> DepositCollateralAsync(string engineAddress, decimal amountEth, CancellationToken cancellationToken = default)
@@ -138,21 +116,23 @@ public sealed class StableEngineService : IStableEngineService
             debtWei);
     }
 
-    public async Task<MintResult> MintMaxAsync(string engineAddress, string user, CancellationToken cancellationToken = default)
+    public async Task<MintResult> MintToHealthFactorAsync(string engineAddress, string user, decimal targetHealthFactor, CancellationToken cancellationToken = default)
     {
         var collateralWei = await QueryAsync(engineAddress, new CollateralDepositedFunction { User = user }, cancellationToken);
         var debtWei = await QueryAsync(engineAddress, new StablecoinMintedFunction { User = user }, cancellationToken);
-        var priceWei = await QueryAsync(engineAddress, new MockEthUsdPriceFunction(), cancellationToken);
+        var priceWei = await QueryAsync(engineAddress, new GetEthUsdPriceFunction(), cancellationToken);
         var ratio = await QueryAsync(engineAddress, new CollateralizationRatioFunction(), cancellationToken);
 
         var collateralUsd = collateralWei * priceWei / Precision;
         var maxDebt = collateralUsd * RatioDenominator / ratio;
-        var toMint = maxDebt - debtWei;
+        var targetHf = Web3.Convert.ToWei(targetHealthFactor, Decimals);
+        var targetDebt = maxDebt * Precision / targetHf;
+
+        var toMint = targetDebt - debtWei;
 
         if (toMint <= BigInteger.Zero)
         {
-            throw new InvalidOperationException(
-                "Запасу для нової емісії немає: позиція вже на межі Health Factor = 1.");
+            return new MintResult(0m, TransactionHash: null, BigInteger.Zero);
         }
 
         var receipt = await _web3Factory.Client.Eth
@@ -164,7 +144,8 @@ public sealed class StableEngineService : IStableEngineService
         {
             throw new InvalidOperationException(
                 "Транзакція mintStablecoin відхилена мережею. Перевірте, що власність на токен " +
-                "стейблкоїна передано контракту StableEngine (transferOwnership).");
+                "стейблкоїна передано контракту StableEngine (transferOwnership) та що оракул " +
+                "повертає свіжу ціну.");
         }
 
         return new MintResult(
@@ -173,55 +154,40 @@ public sealed class StableEngineService : IStableEngineService
             receipt.GasUsed?.Value ?? BigInteger.Zero);
     }
 
-    public async Task<BurnResult> BurnAsync(string engineAddress, BigInteger amountWei, CancellationToken cancellationToken = default)
+    public async Task<InsolvencyResult> SimulateInsolvencyAsync(string engineAddress, string user, decimal percent, CancellationToken cancellationToken = default)
     {
+        var collateralWei = await QueryAsync(engineAddress, new CollateralDepositedFunction { User = user }, cancellationToken);
+
+        var basisPoints = new BigInteger(percent * 100m);
+        var reduceWei = collateralWei * basisPoints / BasisPoints;
+
+        if (reduceWei <= BigInteger.Zero)
+        {
+            throw new InvalidOperationException("Нема чого зменшувати: застава позичальника дорівнює нулю.");
+        }
+
+        var function = new SimulateInsolvencyFunction
+        {
+            User = user,
+            Amount = reduceWei
+        };
+
         var receipt = await _web3Factory.Client.Eth
-            .GetContractTransactionHandler<BurnStablecoinFunction>()
-            .SendRequestAndWaitForReceiptAsync(engineAddress, new BurnStablecoinFunction { Amount = amountWei })
+            .GetContractTransactionHandler<SimulateInsolvencyFunction>()
+            .SendRequestAndWaitForReceiptAsync(engineAddress, function)
             .WaitAsync(_timeout, cancellationToken);
 
         if (receipt.Status?.Value != 1)
         {
             throw new InvalidOperationException(
-                "Транзакція burnStablecoin відхилена мережею. Найімовірніша причина — не виконано approve " +
-                "на потрібну суму в контракті стейблкоїна для адреси StableEngine.");
+                "simulateInsolvency відхилено мережею: викликати бекдор може лише власник StableEngine " +
+                "(акаунт, який розгортав контракт).");
         }
 
-        return new BurnResult(
-            Web3.Convert.FromWei(amountWei, Decimals),
+        return new InsolvencyResult(
+            Web3.Convert.FromWei(reduceWei, Decimals),
             receipt.TransactionHash,
             receipt.GasUsed?.Value ?? BigInteger.Zero);
-    }
-
-    public async Task<WithdrawAttemptResult> TryWithdrawCollateralAsync(string engineAddress, decimal amountEth, CancellationToken cancellationToken = default)
-    {
-        var function = new WithdrawCollateralFunction
-        {
-            Amount = Web3.Convert.ToWei(amountEth, Decimals)
-        };
-
-        try
-        {
-            var receipt = await _web3Factory.Client.Eth
-                .GetContractTransactionHandler<WithdrawCollateralFunction>()
-                .SendRequestAndWaitForReceiptAsync(engineAddress, function)
-                .WaitAsync(_timeout, cancellationToken);
-
-            if (receipt.Status?.Value != 1)
-            {
-                return new WithdrawAttemptResult(amountEth, Reverted: true, "транзакцію відхилено (status = 0)", receipt.TransactionHash);
-            }
-
-            return new WithdrawAttemptResult(amountEth, Reverted: false, RevertReason: null, receipt.TransactionHash);
-        }
-        catch (RpcResponseException ex)
-        {
-            return new WithdrawAttemptResult(amountEth, Reverted: true, ExtractReason(ex.Message), TransactionHash: null);
-        }
-        catch (SmartContractRevertException ex)
-        {
-            return new WithdrawAttemptResult(amountEth, Reverted: true, ExtractReason(ex.Message), TransactionHash: null);
-        }
     }
 
     private async Task<BigInteger> QueryAsync<TFunction>(string engineAddress, TFunction function, CancellationToken cancellationToken)
@@ -231,11 +197,5 @@ public sealed class StableEngineService : IStableEngineService
             .GetContractQueryHandler<TFunction>()
             .QueryAsync<BigInteger>(engineAddress, function)
             .WaitAsync(_timeout, cancellationToken);
-    }
-
-    private static string ExtractReason(string message)
-    {
-        var match = Regex.Match(message, @"StableEngine: [^'""\r\n]+");
-        return match.Success ? match.Value.Trim() : message;
     }
 }

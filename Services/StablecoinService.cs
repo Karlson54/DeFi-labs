@@ -16,6 +16,8 @@ public interface IStablecoinService
     Task<BigInteger> BalanceOfAsync(string tokenAddress, string account, CancellationToken cancellationToken = default);
 
     Task<string> ApproveAsync(string tokenAddress, string spender, BigInteger amountWei, CancellationToken cancellationToken = default);
+
+    Task<string> TransferAsync(string tokenAddress, string to, BigInteger amountWei, CancellationToken cancellationToken = default);
 }
 
 public sealed class StablecoinService : IStablecoinService
@@ -115,6 +117,29 @@ public sealed class StablecoinService : IStablecoinService
         {
             throw new InvalidOperationException(
                 $"Approve на токен {tokenAddress} для {spender} відхилено мережею (status = 0).");
+        }
+
+        return receipt.TransactionHash;
+    }
+
+    public async Task<string> TransferAsync(string tokenAddress, string to, BigInteger amountWei, CancellationToken cancellationToken = default)
+    {
+        var function = new StableCoinTransferFunction
+        {
+            To = to,
+            Amount = amountWei
+        };
+
+        var receipt = await _web3Factory.Client.Eth
+            .GetContractTransactionHandler<StableCoinTransferFunction>()
+            .SendRequestAndWaitForReceiptAsync(tokenAddress, function)
+            .WaitAsync(_timeout, cancellationToken);
+
+        if (receipt.Status?.Value != 1)
+        {
+            throw new InvalidOperationException(
+                $"Transfer токена {tokenAddress} на адресу {to} відхилено мережею (status = 0). " +
+                "Перевірте, що на балансі позичальника достатньо стейблкоїнів.");
         }
 
         return receipt.TransactionHash;

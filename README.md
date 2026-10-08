@@ -1,50 +1,71 @@
-# Лабораторна робота №5 — Кредитний протокол з емісією алгоритмічного стейблкоїна
+# Лабораторна робота №6 — Децентралізовані оракули та Off-chain агент
 
-**Тема.** Проєктування та програмна реалізація смарт-контракту кредитного протоколу
-з функцією емісії алгоритмічного стейблкоїна (DeFi Lending, Over-collateralization).
+**Тема.** Інтеграція децентралізованих оракулів (Chainlink) та розробка автономного
+off-chain агента (Keeper / Liquidator) для підтримки платоспроможності кредитного протоколу.
 **Виконав:** Рубан Андрій, група ПДМ-61.
 
-Клієнт — консольний застосунок C# (.NET 8) + Nethereum, повністю самодостатній:
-сам розгортає стейблкоїн `RubanUSD` та кредитне ядро `StableEngine`, передає ядру
-права власності на токен і відтворює сценарій контрольного завдання.
+Клієнт — консольний застосунок C# (.NET 8) + Nethereum. Він сам розгортає стейблкоїн
+`RubanUSD` та кредитне ядро `StableEngine` (з реальним оракулом Chainlink ETH/USD),
+створює боргову позицію з Health Factor ≈ 1.1, а окремий режим `--bot` запускає
+бота-ліквідатора, який автономно ліквідує неплатоспроможну позицію.
 
 ---
 
-## 1. Ідея протоколу
+## 1. Ідея
 
-Користувач блокує ETH як заставу й отримує під неї стейблкоїн, але не більше, ніж
-дозволяє коефіцієнт забезпечення CR = 150%. Якщо ціна ETH падає й позиція перестає
-бути забезпеченою, вона стає неплатоспроможною.
+У лабораторній №5 ціна ETH була мок-змінною, яку адміністратор міняв вручну. Тепер:
 
-Ключова метрика — Health Factor:
+1. **Ціну дає Chainlink Data Feed.** `StableEngine.getEthUsdPrice()` читає
+   `latestRoundData()`, відкидає від'ємну чи застарілу ціну й масштабує її з 8 знаків
+   до 18 (множення на `1e10`).
+2. **Додано примусову ліквідацію.** Якщо `HF < 1`, будь-хто може викликати
+   `liquidate(user)`: погасити борг власними стейблкоїнами й отримати заставу
+   з премією 10% (`LIQUIDATION_BONUS`).
+3. **Додано бота.** Контракти не виконуються самі, тому за `HF` стежить зовнішній агент.
 
 ```
 HF = (Collateral × 100 / CR) / Debt
+HF ≥ 1  — позиція безпечна;   HF < 1 — позиція підлягає ліквідації
 ```
-
-- `HF ≥ 1` — позиція безпечна;
-- `HF < 1` — позиція підлягає ліквідації;
-- `Debt = 0` — `HF = +∞` (у контракті `type(uint256).max`).
 
 ### Архітектура
 
 ```
-Користувач (EOA)
-   │ depositCollateral{value}() / mintStablecoin() / burnStablecoin() / withdrawCollateral()
+ Chainlink ETH/USD Data Feed  (Sepolia: 0x694A...5306)
+          │ latestRoundData()  — ціна, 8 знаків
+          ▼
+ StableEngine ── getEthUsdPrice() ×1e10 → 18 знаків; перевірка свіжості
+   │  depositCollateral / mintStablecoin / burnStablecoin / withdrawCollateral
+   │  liquidate(user)            ◄── транзакція бота, якщо HF < 1
+   │  simulateInsolvency(...)    ◄── ЛАБОРАТОРНИЙ бекдор (onlyOwner)
+   │ mint / burn (onlyOwner)
    ▼
-StableEngine  ── зберігає заставу й борг, рахує Health Factor, тримає мок-оракул ціни
-   │ mint(to, amount) / burn(from, amount)   ← лише onlyOwner
-   ▼
-StableCoin (ERC-20 + Ownable)  ── власник = StableEngine (після transferOwnership)
+ StableCoin (ERC-20 + Ownable, власник = StableEngine)
+
+ Off-chain:
+ dotnet run -- --bot  →  LiquidatorBot (цикл опитування, 12 с)
+                          └ LiquidatorService (гаманець ліквідатора)
+                              getHealthFactor (view, без газу) → HF < 1? → approve → liquidate
 ```
+
+### Механіка ліквідації
+
+```
+debt              = stablecoinMinted[user]
+baseCollateral    = debt / ціна_ETH                 (ETH, що точно покриває борг)
+collateralToSeize = baseCollateral × (100 + 10) / 100
+```
+
+Контракт обнуляє борг, зменшує заставу позичальника, забирає й спалює стейблкоїни
+ліквідатора, а потім переказує йому `collateralToSeize` ETH. Порядок дій —
+Checks-Effects-Interactions, плюс `ReentrancyGuard`.
 
 ### Інваріанти безпеки
 
-- `mintStablecoin`: спочатку збільшується борг, потім `_revertIfHealthFactorIsBroken`
-  (revert скасовує все), і лише після цього зовнішній `mint`.
-- `withdrawCollateral`: спочатку зменшується застава, потім та сама перевірка HF.
-- `burnStablecoin`: перевірка HF не потрібна, бо погашення лише покращує здоров'я позиції.
-- Патерн Checks-Effects-Interactions + `ReentrancyGuard` (зняття ETH іде через `call`).
+- Ліквідація можлива лише при `HF < 1`; самоліквідація заборонена.
+- Застаріла (`MAX_PRICE_AGE`) або нульова ціна оракула дає revert, а не розрахунок за хибним курсом.
+- `simulateInsolvency` доступна лише власнику й існує тільки для лабораторної.
+  **У реальному протоколі така функція — бекдор, її необхідно видаляти.**
 
 ---
 
@@ -53,103 +74,111 @@ StableCoin (ERC-20 + Ownable)  ── власник = StableEngine (після 
 ```
 DeFi-labs/
 ├── contracts/
-│   ├── StableCoin.sol              # ERC-20 + Ownable: mint/burn лише для власника
-│   ├── StableEngine.sol            # кредитне ядро (застава, борг, Health Factor)
+│   ├── StableCoin.sol              # ERC-20 + Ownable (без змін відносно №5)
+│   ├── StableEngine.sol            # + Chainlink, liquidate, simulateInsolvency
 │   └── artifacts/
-│       ├── StableCoin.json         # abi + bytecode для деплою через Nethereum
-│       └── StableEngine.json
+│       ├── StableCoin.json
+│       └── StableEngine.json       # ПЕРЕКОМПІЛЮВАТИ (нова версія контракту)
 ├── Models/
-│   ├── Web3Settings.cs             # конфіг RPC-вузла та приватного ключа
-│   ├── Lab5Settings.cs             # параметри стейблкоїна та сценарію
-│   ├── DeploymentState.cs          # адреси розгорнутих контрактів
+│   ├── Web3Settings.cs
+│   ├── Lab6Settings.cs             # параметри сценарію, оракула, бота
+│   ├── DeploymentState.cs
 │   ├── ContractArtifact.cs
-│   ├── ScenarioResults.cs          # результати кроків сценарію та звіт
+│   ├── ScenarioResults.cs          # результати кроків, звіти, результат ліквідації
 │   └── Contracts/
-│       ├── StableCoinDefinition.cs # типізовані повідомлення Nethereum (токен)
+│       ├── StableCoinDefinition.cs
 │       └── StableEngineDefinition.cs
 ├── Services/
-│   ├── Web3Factory.cs
+│   ├── Web3Factory.cs              # основний гаманець + окремий клієнт ліквідатора
 │   ├── ContractArtifactProvider.cs
-│   ├── DeploymentStateStore.cs     # читання/запис deployment-state.json
-│   ├── StablecoinService.cs        # деплой токена, transferOwnership, approve
-│   ├── StableEngineService.cs      # деплой ядра, deposit/mint/burn/withdraw, HF
-│   ├── ScenarioRunner.cs           # оркестрація сценарію контрольного завдання
-│   └── ConsoleReportRenderer.cs    # консольний звіт
-├── Program.cs                      # DI та обробка помилок
+│   ├── DeploymentStateStore.cs
+│   ├── WalletService.cs            # баланс і переказ ETH
+│   ├── StablecoinService.cs
+│   ├── StableEngineService.cs      # деплой, депозит, емісія до цільового HF, бекдор
+│   ├── LiquidatorService.cs        # дії гаманця ліквідатора (HF, approve, liquidate)
+│   ├── LiquidatorBot.cs            # автономний цикл моніторингу
+│   ├── ScenarioRunner.cs           # підготовка стенду та виклик бекдора
+│   └── ConsoleReportRenderer.cs
+├── Program.cs                      # DI, режими запуску, обробка помилок
 ├── appsettings.example.json
 ├── DeFi.csproj
-└── deployment-state.json           # генерується автоматично
+└── deployment-state-lab6.json      # генерується автоматично
 ```
+
+> Файл `Models/Lab6Settings.cs` слід видалити: клас `StablecoinSettings` тепер у `Lab6Settings.cs`.
 
 ---
 
-## 3. Запуск
+## 3. Запуск (Sepolia)
 
-### Крок 0. Локальна нода
+### Крок 0. Підготовка
 
-```bash
-cd ~/hardhat-node
-npx hardhat node
-```
-
-Залиште вікно відкритим. Перший акаунт Hardhat має 10000 тестових ETH — їх
-вистачає на заставу й газ.
+- Два **тестових** гаманці: позичальник (він же власник протоколу) і ліквідатор.
+  Ключі від гаманців з реальними коштами використовувати не можна.
+- Тестовий ETH у Sepolia на позичальнику: приблизно 0.05 ETH
+  (деплой + застава 0.01 + 0.02 ETH, які піднімуться ліквідатору на газ).
+- RPC-endpoint Sepolia (Infura/Alchemy).
 
 ### Крок 1. Компіляція контрактів
 
-1. https://remix.ethereum.org → створити `StableCoin.sol` та `StableEngine.sol`
-   в одній теці, вставити код з `contracts/`.
-2. Solidity Compiler → `0.8.24+` → Compile (потрібен OpenZeppelin v5).
-3. З Compilation Details скопіювати `ABI` та `BYTECODE` (поле `object`) у файли
-   `contracts/artifacts/StableCoin.json` і `StableEngine.json`.
+1. https://remix.ethereum.org → створити `StableCoin.sol` і `StableEngine.sol` в одній теці.
+2. Solidity Compiler → `0.8.24+` → Compile (OpenZeppelin v5 та `@chainlink/contracts`
+   Remix підтягне з npm автоматично; локально в Hardhat/Foundry: `npm install @chainlink/contracts`).
+3. З Compilation Details скопіювати `ABI` та `BYTECODE` (поле `object`) у
+   `contracts/artifacts/StableEngine.json`. `StableCoin.json` лишається без змін.
 
 ### Крок 2. Конфігурація
 
-Скопіювати `appsettings.example.json` → `appsettings.json`, заповнити:
+Скопіювати `appsettings.example.json` → `appsettings.json` (файл у `.gitignore`), заповнити:
 
-- `Web3Settings:PrivateKey` — тестовий ключ першого акаунта Hardhat;
-- `Lab5Settings:Stablecoin` — назва стейблкоїна (за завданням — прізвище + USD);
-- `Lab5Settings:InitialEthUsdPrice` / `CollateralEth` / `WithdrawEth` — параметри
-  сценарію (за замовчуванням $2000, 2 ETH, 1 ETH).
+- `Web3Settings:RpcUrl`, `ChainId` = `11155111`, `PrivateKey` — ключ позичальника;
+- `Lab6Settings:LiquidatorPrivateKey` — ключ **іншого** гаманця (ліквідатор);
+- `Lab6Settings:PriceFeedAddress` — `0x694AA1769357215DE4FAC081bf1f309aDC325306` (ETH/USD, Sepolia).
 
-### Крок 3. Запуск
+Необов'язково, для локальної перевірки: `npx hardhat node --fork <SEPOLIA_RPC>` і `ChainId` = `31337`.
+Адреса Data Feed на форку та сама.
+
+### Крок 3. Підготовка стенду
 
 ```bash
 dotnet restore
 dotnet run
 ```
 
-Сценарій:
+Скрипт розгортає `RubanUSD` і `StableEngine` (з адресою оракула в конструкторі), передає
+ядру власність на токен, вносить заставу й випускає стейблкоїни так, щоб `HF ≈ 1.1`.
+Потім він докидає ліквідатору ETH на газ і стейблкоїни для викупу боргу.
+Повторний запуск безпечний: наявні контракти та застава перевикористовуються.
 
-1. розгортає `RubanUSD` та `StableEngine`, передає ядру власність на токен;
-2. вносить 2 ETH застави (при ціні $2000);
-3. програмно підбирає й випускає максимальну суму стейблкоїнів;
-4. намагається зняти 1 ETH → транзакція відкочується, скрипт перехоплює помилку
-   й виводить, що захист спрацював;
-5. додатково: погашає борг (`approve` + `burnStablecoin`) і знімає 1 ETH успішно.
+### Крок 4. Бот-ліквідатор (термінал №1)
 
-Адреси зберігаються в `deployment-state.json`. Якщо адреса вже не містить коду
-(наприклад, нода Hardhat була перезапущена), клієнт сам розгорне контракти заново.
-
-### Приклад виводу (скорочено)
-
-```
-КРОК 3. ЕМІСІЯ МАКСИМАЛЬНОЇ СУМИ СТЕЙБЛКОЇНІВ (mintStablecoin)
-  Випущено..............: 2666.66666667 RUBUSD
-  Позиція:
-    Застава.............: 2 ETH ($4000)
-    Борг................: 2666.66666667 RUBUSD
-    Health Factor.......: 1
-
-КРОК 4. СПРОБА ЗНЯТИ ЗАСТАВУ (withdrawCollateral) — ОЧІКУЄТЬСЯ REVERT
-  Спроба зняти..........: 1 ETH
-  Причина відкату.......: StableEngine: health factor broken
-  [OK] Захист спрацював успішно: транзакцію відхилено, бо Health Factor впав би нижче 1.
+```bash
+dotnet run -- --bot
 ```
 
-Максимальний борг при заставі $4000: `4000 × 100 / 150 = 2666.(6)`. Округлення в
-контракті йде вниз, тому Health Factor дорівнює рівно 1.0 і транзакція проходить.
-Після зняття 1 ETH застава була б $2000, ліміт боргу — $1333, тобто `HF ≈ 0.5`.
+Бот щоразу опитує `getHealthFactor` (безкоштовний view-запит) і пише в консоль:
+`Позиція 0x... | HF: 1.1`.
+
+### Крок 5. Штучний крах (термінал №2)
+
+```bash
+dotnet run -- --crash
+```
+
+Бекдор `simulateInsolvency` зменшує `collateralDeposited` позичальника на
+`CrashCollateralPercent` (20%), тож `HF = 1.1 × 0.8 = 0.88`. У терміналі бота:
+
+```
+[12:04:31] Позиція 0x... | HF: 0.88
+[12:04:31] [УВАГА] Виявлено неплатоспроможну позицію 0x...! Ініціалізація ліквідації...
+[12:04:55] [УСПІХ] Позицію ліквідовано у блоці 6543210. Tx: 0x...
+```
+
+Це і є момент спрацювання бота для звіту.
+
+> **Обмеження:** щоб ліквідація була прибутковою без втрат застави, треба
+> `CrashCollateralPercent` ≲ 33% при `TargetHealthFactor = 1.1`
+> (застава мусить покрити борг + 10% премії).
 
 ---
 
@@ -157,13 +186,14 @@ dotnet run
 
 | Вимога | Реалізація |
 |---|---|
-| Розгорнути StableCoin і StableEngine, назвати за прізвищем | `Lab5Settings:Stablecoin` (`RubanUSD`), `ScenarioRunner` |
-| `burnStablecoin(uint256 amount)` | `StableEngine.burnStablecoin` — `transferFrom` + `burn`, борг зменшується |
-| `withdrawCollateral(uint256 amount)` з перевіркою HF | `StableEngine.withdrawCollateral` → `_revertIfHealthFactorIsBroken` |
-| Депозит 2 ETH при $2000 | `StableEngineService.DepositCollateralAsync` |
-| Програмний підбір максимальної емісії | `StableEngineService.MintMaxAsync` (формула з даних ланцюга) |
-| Перехоплення revert при знятті 1 ETH | `StableEngineService.TryWithdrawCollateralAsync` |
+| Розгорнути контракти в Sepolia з адресою оракула ETH/USD | `StableEngineService.DeployAsync` → конструктор `StableEngine(stablecoin_, priceFeed_)` |
+| Депозит і емісія, HF ≈ 1.1 | `ScenarioRunner` → `MintToHealthFactorAsync` (борг = `maxDebt / 1.1`) |
+| Бот-ліквідатор (C#/Nethereum) | `LiquidatorBot` + `LiquidatorService`, режим `--bot` |
+| Бекдор для штучного краху | `StableEngine.simulateInsolvency` (onlyOwner), режим `--crash` |
+| Фіксація спрацювання бота | лог терміналу + хеш транзакції `liquidate` у Sepolia Etherscan |
 
+**У звіті:** лістинг `StableEngine.sol`, код бота (`LiquidatorBot.cs`, `LiquidatorService.cs`),
+скриншот терміналу бота з `[УСПІХ]` та хеш транзакції ліквідації.
 
 ---
 
@@ -171,7 +201,7 @@ dotnet run
 
 | Шар | Технологія |
 |---|---|
-| Смарт-контракти | Solidity 0.8.24, OpenZeppelin v5 (ERC20, Ownable, ReentrancyGuard) |
-| Локальна мережа | Hardhat Network |
-| Клієнт | C# (.NET 8), Nethereum 4.29, Microsoft.Extensions (DI, Options, Configuration) |
-| Стан деплою | `deployment-state.json` |
+| Смарт-контракти | Solidity 0.8.24, OpenZeppelin v5 (ERC20, Ownable, ReentrancyGuard), Chainlink `AggregatorV3Interface` |
+| Мережа | Sepolia (опційно — Hardhat-форк Sepolia) |
+| Клієнт та бот | C# (.NET 8), Nethereum 4.29, Microsoft.Extensions (DI, Options, Configuration) |
+| Стан деплою | `deployment-state-lab6.json` |

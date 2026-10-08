@@ -12,7 +12,7 @@ public sealed record StablecoinDeploymentResult(
 public sealed record EngineDeploymentResult(
     string Address,
     string StablecoinAddress,
-    decimal InitialEthUsdPrice,
+    string PriceFeedAddress,
     bool WasAlreadyDeployed,
     string? TransactionHash);
 
@@ -30,28 +30,27 @@ public sealed record PositionSnapshot(
 
 public sealed record DepositResult(
     decimal AmountEth,
-    string TransactionHash,
+    string? TransactionHash,
     BigInteger GasUsed);
 
 public sealed record MintResult(
     decimal Amount,
-    string TransactionHash,
+    string? TransactionHash,
     BigInteger GasUsed);
 
-public sealed record BurnResult(
-    decimal Amount,
-    string TransactionHash,
-    BigInteger GasUsed);
-
-public sealed record WithdrawAttemptResult(
-    decimal AmountEth,
-    bool Reverted,
-    string? RevertReason,
-    string? TransactionHash);
+public sealed record LiquidatorFundingResult(
+    string LiquidatorAddress,
+    decimal EthSent,
+    string? EthTransactionHash,
+    decimal EthBalance,
+    decimal StableSent,
+    string? StableTransactionHash,
+    decimal StableBalance);
 
 public sealed record ScenarioReport(
     string Network,
     string DeployerAddress,
+    string LiquidatorAddress,
     decimal EthUsdPrice,
     StablecoinDeploymentResult Stablecoin,
     EngineDeploymentResult Engine,
@@ -60,8 +59,27 @@ public sealed record ScenarioReport(
     PositionSnapshot PositionAfterDeposit,
     MintResult Mint,
     PositionSnapshot PositionAfterMint,
-    WithdrawAttemptResult BlockedWithdraw,
-    PositionSnapshot PositionAfterBlocked,
-    BurnResult Burn,
-    WithdrawAttemptResult WithdrawAfterBurn,
-    PositionSnapshot FinalPosition);
+    LiquidatorFundingResult Funding);
+
+public sealed record InsolvencyResult(
+    decimal ReducedEth,
+    string TransactionHash,
+    BigInteger GasUsed);
+
+public sealed record CrashReport(
+    string Network,
+    string OwnerAddress,
+    string EngineAddress,
+    decimal EthUsdPrice,
+    decimal Percent,
+    PositionSnapshot Before,
+    InsolvencyResult Reduce,
+    PositionSnapshot After);
+
+public sealed record LiquidationResult(
+    string User,
+    string TransactionHash,
+    BigInteger BlockNumber,
+    decimal DebtCovered,
+    decimal CollateralSeizedEth,
+    BigInteger GasUsed);
