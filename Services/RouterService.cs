@@ -13,10 +13,6 @@ public interface IRouterService
         string recipient, CancellationToken cancellationToken = default);
 }
 
-/// <summary>
-/// Пряма взаємодія з Uniswap V2 Router (композитність з лабораторної №4).
-/// Тут Router викликає сам клієнт (EOA) — щоб створити пул A/B, у який потім ходитиме сховище.
-/// </summary>
 public sealed class RouterService : IRouterService
 {
     private const int Decimals = 18;
@@ -42,10 +38,9 @@ public sealed class RouterService : IRouterService
             TokenB = tokenB,
             AmountADesired = Web3.Convert.ToWei(amountA, Decimals),
             AmountBDesired = Web3.Convert.ToWei(amountB, Decimals),
-            // Мінімуми = 1 — навчальне спрощення (як у DefiIntegrator із лабораторної №4).
             AmountAMin = 1,
             AmountBMin = 1,
-            To = recipient, // LP-токени отримує інвестор, а не сховище
+            To = recipient,
             Deadline = new BigInteger(DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds())
         };
 

@@ -4,7 +4,6 @@ using Nethereum.Contracts;
 
 namespace DeFi.Models.Contracts;
 
-/// <summary>Виклик addLiquidity у Uniswap V2 Router (створює пул A/B, якщо його ще немає).</summary>
 [Function("addLiquidity")]
 public class AddLiquidityFunction : FunctionMessage
 {

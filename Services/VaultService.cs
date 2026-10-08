@@ -133,7 +133,6 @@ public sealed class VaultService : IVaultService
         var totalAssetsWei = await QueryAsync(vaultAddress, new TotalAssetsFunction(), cancellationToken);
         var totalSharesWei = await QueryAsync(vaultAddress, new VaultTotalSupplyFunction(), cancellationToken);
 
-        // Ціна однієї "повної" акції (1e18 wei) у базовому активі.
         var priceWei = await QueryAsync(vaultAddress, new ConvertToAssetsFunction { Shares = Precision }, cancellationToken);
 
         return new VaultSnapshot(

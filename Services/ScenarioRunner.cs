@@ -7,13 +7,10 @@ namespace DeFi.Services;
 
 public interface IScenarioRunner
 {
-    /// <summary>Повний життєвий цикл інвестора: депозит -> винагорода -> compound -> перевірка -> зняття.</summary>
     Task<ScenarioReport> RunAsync(CancellationToken cancellationToken = default);
 
-    /// <summary>Підготовка стенду для бота: інфраструктура + депозит (без compound і зняття).</summary>
     Task<StandReport> PrepareStandAsync(CancellationToken cancellationToken = default);
 
-    /// <summary>Імітація фарму: пряма відправка Токена B на адресу сховища.</summary>
     Task<DonationReport> DonateRewardAsync(CancellationToken cancellationToken = default);
 }
 
@@ -44,7 +41,6 @@ public sealed class ScenarioRunner : IScenarioRunner
         _settings = settingsOptions.Value;
     }
 
-    // Внутрішній контейнер результатів підготовки інфраструктури.
     private sealed record Infrastructure(
         TokenDeploymentResult TokenA,
         TokenDeploymentResult TokenB,
@@ -59,19 +55,15 @@ public sealed class ScenarioRunner : IScenarioRunner
         var infra = await PrepareInfrastructureAsync(user, cancellationToken);
         var vault = infra.Vault.Address;
 
-        // КРОК 3. Депозит.
         var (deposit, sharesWei, afterDeposit) = await DepositStepAsync(infra, user, cancellationToken);
 
-        // КРОК 4. Імітація винагороди: звичайний ERC-20 переказ Токена B на сховище.
         var reward = await TransferRewardAsync(infra, cancellationToken);
         var afterReward = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
 
-        // КРОК 5. compound(): продаж Токена B за Токен A через Router.
         var rewardWei = await _tokenService.BalanceOfAsync(infra.TokenB.Address, vault, cancellationToken);
         var compound = await _vaultService.CompoundAsync(vault, rewardWei, cancellationToken);
         var afterCompound = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
 
-        // КРОК 6. Зняття акцій, випущених у цьому запуску, і порівняння з початковим депозитом.
         var balanceBefore = await _tokenService.BalanceOfAsync(infra.TokenA.Address, user, cancellationToken);
         var withdrawTx = await _vaultService.WithdrawAsync(vault, sharesWei, cancellationToken);
         var balanceAfter = await _tokenService.BalanceOfAsync(infra.TokenA.Address, user, cancellationToken);
@@ -153,11 +145,6 @@ public sealed class ScenarioRunner : IScenarioRunner
             Reward: new RewardTransferResult(_settings.RewardAmount, Web3.Convert.FromWei(balanceWei, Decimals), tx));
     }
 
-    // ---------------------------------------------------------------------
-    // Кроки сценарію
-    // ---------------------------------------------------------------------
-
-    /// <summary>Токени A/B, пул у зовнішньому DEX, сховище — із перевикористанням наявних адрес.</summary>
     private async Task<Infrastructure> PrepareInfrastructureAsync(string user, CancellationToken cancellationToken)
     {
         var state = await _stateStore.LoadAsync(_web3Factory.ChainId, user, cancellationToken);
@@ -165,7 +152,6 @@ public sealed class ScenarioRunner : IScenarioRunner
         var tokenA = await EnsureTokenAsync(_settings.TokenA, state.TokenAAddress, cancellationToken);
         var tokenB = await EnsureTokenAsync(_settings.TokenB, state.TokenBAddress, cancellationToken);
 
-        // Якщо токени перевипущено або змінено Router — старе сховище й пул неактуальні.
         var tokensChanged = !tokenA.WasAlreadyDeployed || !tokenB.WasAlreadyDeployed;
         var routerChanged = !string.Equals(state.RouterAddress, _settings.RouterAddress, StringComparison.OrdinalIgnoreCase);
 
@@ -182,7 +168,6 @@ public sealed class ScenarioRunner : IScenarioRunner
         };
         await _stateStore.SaveAsync(state, cancellationToken);
 
-        // Пул A/B у зовнішньому протоколі: без нього compound() не зможе продати винагороду.
         LiquidityResult? pool = null;
         if (!state.LiquidityProvided)
         {
@@ -212,13 +197,11 @@ public sealed class ScenarioRunner : IScenarioRunner
 
         var before = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
 
-        // Сховище забирає токени через transferFrom, тому спершу потрібен approve.
         await _tokenService.ApproveAsync(infra.TokenA.Address, vault, _settings.DepositAmount, cancellationToken);
         var tx = await _vaultService.DepositAsync(vault, _settings.DepositAmount, cancellationToken);
 
         var after = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
 
-        // Кількість отриманих акцій = приріст балансу акцій користувача.
         var sharesWei = after.SharesWei - before.SharesWei;
 
         var deposit = new DepositResult(
@@ -239,10 +222,6 @@ public sealed class ScenarioRunner : IScenarioRunner
 
         return new RewardTransferResult(_settings.RewardAmount, Web3.Convert.FromWei(balanceWei, Decimals), tx);
     }
-
-    // ---------------------------------------------------------------------
-    // Допоміжні методи
-    // ---------------------------------------------------------------------
 
     private void ValidateSettings()
     {

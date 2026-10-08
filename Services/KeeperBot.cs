@@ -10,11 +10,6 @@ public interface IKeeperBot
     Task RunAsync(CancellationToken cancellationToken = default);
 }
 
-/// <summary>
-/// Off-chain кіпер (Keeper): періодично перевіряє rewardToken.balanceOf(vault)
-/// і, якщо винагорода перевищила поріг, підписує транзакцію vault.compound().
-/// Контракт не може виконатися "за розкладом" сам — хтось має оплатити газ.
-/// </summary>
 public sealed class KeeperBot : IKeeperBot
 {
     private const int Decimals = 18;

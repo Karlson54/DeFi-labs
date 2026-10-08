@@ -24,10 +24,8 @@ public sealed record VaultDeploymentResult(
     bool WasAlreadyDeployed,
     string? TransactionHash);
 
-/// <summary>Результат простої транзакції до сховища (deposit / withdraw).</summary>
 public sealed record VaultTxResult(string TransactionHash, BigInteger GasUsed);
 
-/// <summary>Знімок стану сховища та позиції конкретного користувача.</summary>
 public sealed record VaultSnapshot(
     BigInteger SharesWei,
     decimal Shares,
@@ -61,7 +59,6 @@ public sealed record WithdrawResult(
     string TransactionHash,
     BigInteger GasUsed);
 
-/// <summary>Звіт повного життєвого циклу інвестора (контрольне завдання).</summary>
 public sealed record ScenarioReport(
     string Network,
     string UserAddress,
@@ -79,7 +76,6 @@ public sealed record ScenarioReport(
     WithdrawResult Withdraw,
     VaultSnapshot FinalPosition);
 
-/// <summary>Звіт підготовки стенду (--stand): інфраструктура + депозит без compound.</summary>
 public sealed record StandReport(
     string Network,
     string UserAddress,
@@ -91,7 +87,6 @@ public sealed record StandReport(
     DepositResult Deposit,
     VaultSnapshot PositionAfterDeposit);
 
-/// <summary>Звіт імітації фарму (--donate): винагорода надіслана на сховище.</summary>
 public sealed record DonationReport(
     string Network,
     string VaultAddress,

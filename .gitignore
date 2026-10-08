@@ -210,7 +210,4 @@ FodyWeavers.xsd
 *.msp
 *.sln.iml
 
-appsettings.json
-
 .idea/
-**/wallet.json
