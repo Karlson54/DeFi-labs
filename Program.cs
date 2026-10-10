@@ -1,37 +1,35 @@
 using System.Text;
 using DeFi.Models;
 using DeFi.Services;
+using Nethereum.ABI.FunctionEncoding;
+using Nethereum.Contracts;
 using Nethereum.JsonRpc.Client;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-//   dotnet run               -> повний життєвий цикл інвестора (контрольне завдання)
-//   dotnet run -- --stand    -> підготовка стенду: деплой, пул, депозит (без compound)
-//   dotnet run -- --bot      -> автономний бот-кіпер (викликає compound)
-//   dotnet run -- --donate   -> імітація фарму: переказ винагороди на сховище
-var runBot = args.Contains("--bot");
-var runStand = args.Contains("--stand");
-var runDonate = args.Contains("--donate");
+//   dotnet run             -> деплой, поповнення LINK та відправка крос-чейн повідомлення (контрольне завдання)
+//   dotnet run -- --track  -> агент очікує доставки останнього повідомлення в цільовій мережі
+var runTrack = args.Contains("--track");
 
 var configuration = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
     .AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false)
-    .AddEnvironmentVariables("DEFILAB7_")
+    .AddEnvironmentVariables("DEFILAB8_")
     .Build();
 
 var services = new ServiceCollection();
 
 services.Configure<Web3Settings>(configuration.GetSection("Web3Settings"));
-services.Configure<Lab7Settings>(configuration.GetSection("Lab7Settings"));
+services.Configure<Lab8Settings>(configuration.GetSection("Lab8Settings"));
 
 services.AddSingleton<IContractArtifactProvider, ContractArtifactProvider>();
 services.AddSingleton<IWeb3Factory, Web3Factory>();
 services.AddSingleton<IDeploymentStateStore, DeploymentStateStore>();
-services.AddSingleton<ITokenService, TokenService>();
-services.AddSingleton<IRouterService, RouterService>();
-services.AddSingleton<IVaultService, VaultService>();
-services.AddSingleton<IKeeperBot, KeeperBot>();
+services.AddSingleton<ILinkService, LinkService>();
+services.AddSingleton<IMessengerService, MessengerService>();
+services.AddSingleton<IReceiverService, ReceiverService>();
+services.AddSingleton<IDeliveryTracker, DeliveryTracker>();
 services.AddSingleton<IScenarioRunner, ScenarioRunner>();
 services.AddSingleton<IReportRenderer, ConsoleReportRenderer>();
 
@@ -46,34 +44,20 @@ Console.CancelKeyPress += (_, e) =>
 
 try
 {
-    if (runBot)
+    var renderer = provider.GetRequiredService<IReportRenderer>();
+
+    if (runTrack)
     {
-        var bot = provider.GetRequiredService<IKeeperBot>();
-        await bot.RunAsync(cts.Token);
-        return 0;
+        var tracker = provider.GetRequiredService<IDeliveryTracker>();
+        var delivery = await tracker.TrackAsync(cts.Token);
+        Console.WriteLine(renderer.Render(delivery));
+        return delivery.Delivered ? 0 : 1;
     }
 
     var runner = provider.GetRequiredService<IScenarioRunner>();
-    var renderer = provider.GetRequiredService<IReportRenderer>();
 
-    if (runDonate)
-    {
-        Console.WriteLine("Імітація фарму: переказ винагороди на сховище (Лаб. роб. №7)...");
-        var donation = await runner.DonateRewardAsync(cts.Token);
-        Console.WriteLine(renderer.Render(donation));
-        return 0;
-    }
-
-    if (runStand)
-    {
-        Console.WriteLine("Підготовка стенду: токени, пул у зовнішньому DEX, сховище, депозит (Лаб. роб. №7)...");
-        var stand = await runner.PrepareStandAsync(cts.Token);
-        Console.WriteLine(renderer.Render(stand));
-        return 0;
-    }
-
-    Console.WriteLine("Запуск життєвого циклу інвестора у сховищі з автокомпаундингом (Лаб. роб. №7)...");
-    Console.WriteLine("Перший запуск розгортає токени, наповнює пул і розгортає сховище — це може зайняти кілька хвилин.");
+    Console.WriteLine("Запуск крос-чейн взаємодії L1 -> L2 через Chainlink CCIP (Лаб. роб. №8)...");
+    Console.WriteLine("Перший запуск розгортає контракти у двох мережах — це може зайняти кілька хвилин.");
 
     var report = await runner.RunAsync(cts.Token);
     Console.WriteLine(renderer.Render(report));
@@ -88,7 +72,7 @@ catch (HttpRequestException ex)
 {
     WriteError(
         "Не вдалося підключитися до RPC-вузла.",
-        "Перевірте Web3Settings:RpcUrl (Infura/Alchemy endpoint для Sepolia або адреса локальної ноди) та інтернет-з'єднання.",
+        "Перевірте Web3Settings:RpcUrl (вихідна мережа), Lab8Settings:Destination:RpcUrl (L2) та інтернет-з'єднання.",
         ex.Message);
     return 1;
 }
@@ -96,8 +80,16 @@ catch (RpcResponseException ex)
 {
     WriteError(
         "Вузол відхилив запит.",
-        "Типові причини: недостатньо тестового ETH на газ, невірна адреса Router-а у Lab7Settings:RouterAddress, " +
-        "відсутній пул B->A або відкат через require у контракті.",
+        "Типові причини: недостатньо тестового ETH на газ (у L1 або L2), невірні адреси Router-а, " +
+        "непідтримуваний напрямок (UnsupportedDestinationChain — перевірте chain selector) або брак LINK.",
+        ex.Message);
+    return 1;
+}
+catch (SmartContractRevertException ex)
+{
+    WriteError(
+        "Транзакцію відкотив смарт-контракт.",
+        "Перевірте LINK-баланс месенджера, chain selector та те, що викликає власник контракту.",
         ex.Message);
     return 1;
 }

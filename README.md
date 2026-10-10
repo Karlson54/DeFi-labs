@@ -1,65 +1,70 @@
-# Лабораторна робота №7 — Сховище (Vault) з автоматичним реінвестуванням винагород
+# Лабораторна робота №8 — Мережі другого рівня (Layer 2) та крос-чейн взаємодія через Chainlink CCIP
 
-**Тема.** Розробка смарт-контракту сховища (Vault) для автоматизованого управління активами
-та реінвестування винагород (Yield Aggregator, Auto-compounding).
+**Тема.** Розгортання смарт-контрактів у мережах другого рівня (Layer 2) та реалізація
+програмної взаємодії з використанням крос-чейн протоколів.
 **Виконав:** Рубан Андрій, група ПДМ-61.
 
-Клієнт — консольний застосунок C# (.NET 8) + Nethereum, повністю самодостатній:
-сам випускає два ERC-20 токени, наповнює пул у зовнішньому DEX (Uniswap V2 Router з лаб. №4),
-розгортає `AutoCompoundVault`, відтворює життєвий цикл інвестора, а режим `--bot`
-запускає off-chain кіпера, який автономно викликає `compound()`.
+Клієнт — консольний застосунок C# (.NET 8) + Nethereum. Він сам розгортає контракт-отримувач
+`CrossChainReceiver` в Arbitrum Sepolia (L2) та контракт-відправник `CrossChainMessenger`
+в Ethereum Sepolia (L1), поповнює месенджер токенами LINK, розраховує комісію й ініціює
+крос-чейн повідомлення. Режим `--track` запускає off-chain агента, який дочікується
+доставки повідомлення в L2.
 
 ---
 
-## 1. Ідея протоколу
+## 1. Ідея
 
-Фарм-протоколи виплачують винагороду сторонніми токенами. Щоб заробити складний відсоток,
-її треба забрати, продати за базовий актив і знову покласти на депозит — вручну це збиткове
-через газ. Сховище робить це для всіх користувачів одразу:
+L2-мережі (Arbitrum, Base, Optimism) EVM-сумісні: той самий Solidity, той самий байткод,
+той самий JSON-RPC. Для C#-клієнта вони відрізняються від L1 лише `RpcUrl` та `ChainId`.
+Тому один і той самий приватний ключ дає одну й ту саму адресу в обох мережах, а клієнт
+тримає два `Web3`-екземпляри — по одному на мережу.
 
-1. Користувач вносить Токен A і отримує **акції** (`vRUBC`) — свою частку в загальному пулі.
-2. На сховище надходить винагорода (Токен B).
-3. Кіпер викликає `compound()`: уся винагорода одним обміном конвертується в Токен A
-   через Router і залишається на балансі сховища.
-4. Кількість акцій не змінилась, а `totalAssets` зросла — кожна акція подорожчала.
-
-### Математика акцій
-
-```
-Перший депозит:  shares = assets − MINIMUM_SHARES   (MINIMUM_SHARES акцій спалюються)
-Далі:            shares = assets × totalSupply / totalAssets
-Зняття:          assets = shares × totalAssets / totalSupply
-Ціна акції:      price  = totalAssets / totalSupply
-```
+Але контракт в одній мережі не бачить стан іншої. Для обміну даними використовується
+Chainlink CCIP: контракт-відправник передає повідомлення локальному Router-у, децентралізована
+мережа оракулів переносить його, а Router у цільовій мережі викликає `ccipReceive` отримувача.
 
 ### Архітектура
 
 ```
-Інвестор (EOA)
-   │ approve → deposit(assets) / withdraw(shares)
+ C# клієнт (Nethereum)
+   │ deploy / transfer LINK / sendMessage                  │ deploy / читання lastMessageId
+   ▼  (Web3Settings: Sepolia)                              ▼  (Lab8Settings:Destination: Arbitrum Sepolia)
+ CrossChainMessenger (L1)                              CrossChainReceiver (L2)
+   │ getFee() ─► Router.getFee                              ▲ ccipReceive() — лише від Router
+   │ approve(LINK) ─► Router                                │
+   │ ccipSend() ─────────────────────────────────┐          │
+   ▼                                             ▼          │
+ CCIP Router (Sepolia) ══► мережа оракулів Chainlink ══► CCIP Router (Arbitrum Sepolia)
+   │ emit MessageSent(messageId, ...)
    ▼
-AutoCompoundVault (ERC-20 vTokenA)  ◄── будь-який кіпер: compound()
-   │ totalAssets = tokenA.balanceOf(vault)
-   │ винагорода: tokenB.balanceOf(vault)  ◄── прямий переказ / фарм-протокол
-   │ swapExactTokensForTokens([B → A], to = vault)
-   ▼
-Uniswap V2 Router  ──►  пул A/B (створюється клієнтом через addLiquidity)
+ клієнт зберігає messageId у deployment-state-lab8.json
 
-Off-chain:
-dotnet run -- --bot → KeeperBot (цикл 12 с)
-                      └ rewardToken.balanceOf(vault) ≥ порогу? → vault.compound()
+ Off-chain:
+ dotnet run -- --track → DeliveryTracker (цикл 15 с)
+                         └ receiver.lastMessageId == messageId? → Status: Success
+```
+
+### Як формується повідомлення
+
+```
+receiver     = abi.encode(адреса отримувача)     // універсальний байтовий масив (CCIP підтримує й не-EVM мережі)
+data         = abi.encode(текст)
+tokenAmounts = []                                // передаємо дані, а не активи
+extraArgs    = EVMExtraArgsV1{ gasLimit }        // газ на виконання в цільовій мережі
+feeToken     = LINK
 ```
 
 ### Інваріанти безпеки
 
-- **Checks-Effects-Interactions:** у `deposit` спершу `_mint`, потім `transferFrom`;
-  у `withdraw` спершу `_burn`, потім `transfer`. Додатково `ReentrancyGuard`.
-- **immutable:** `asset`, `rewardToken`, `router` фіксуються в конструкторі й не підмінюються.
-- **Захист першого депозиту:** `MINIMUM_SHARES = 1000` акцій назавжди спалюються на `0xdead`.
-- **Округлення на користь сховища:** усі ділення округлюють вниз.
-- **Отримувач обміну — `address(this)`:** навіть зловмисний виклик `compound()` не виводить кошти назовні.
-- **Спрощення (навчальні):** `amountOutMin = 1` у `compound()`. У продакшені мінімум рахують
-  від оракула/TWAP, інакше можливі sandwich-атаки (MEV).
+- **onlyOwner на `sendMessage`:** комісію контракт платить зі свого LINK-балансу, тому без обмеження
+  будь-хто міг би спустошити баланс.
+- **immutable:** `router` та `linkToken` фіксуються в конструкторі й не підмінюються.
+- **Перевірка балансу перед відправкою:** `balanceOf >= fees`, інакше зрозумілий revert.
+- **Мінімальний allowance:** Router отримує approve рівно на суму комісії (`forceApprove`).
+- **onlyRouter на отримувачі:** базовий `CCIPReceiver` дозволяє викликати `ccipReceive` лише Router-у,
+  тож підробити повідомлення напряму неможливо.
+- **Спрощення (навчальні):** отримувач приймає повідомлення від будь-якого відправника. У продакшені
+  додають allowlist мереж-відправників (`sourceChainSelector`) та адрес-відправників.
 
 ---
 
@@ -68,65 +73,72 @@ dotnet run -- --bot → KeeperBot (цикл 12 с)
 ```
 DeFi-labs/
 ├── contracts/
-│   ├── AssetToken.sol                  # ERC-20 (з лаб. №4, без змін)
-│   ├── AutoCompoundVault.sol           # сховище з автокомпаундингом
-│   ├── interfaces/
-│   │   └── IUniswapV2Router02.sol      # інтерфейс Router-а (з лаб. №4)
+│   ├── CrossChainMessenger.sol         # відправник повідомлень (L1)
+│   ├── CrossChainReceiver.sol          # отримувач-пустушка (L2)
 │   └── artifacts/
-│       ├── AssetToken.json             # abi + bytecode (з лаб. №4)
-│       └── AutoCompoundVault.json      # ← вставити BYTECODE з Remix
+│       ├── CrossChainMessenger.json    # ← вставити BYTECODE з Remix
+│       └── CrossChainReceiver.json     # ← вставити BYTECODE з Remix
 ├── Models/
-│   ├── Web3Settings.cs
-│   ├── Lab7Settings.cs                 # параметри сценарію, пулу, бота
+│   ├── Web3Settings.cs                 # RPC та ключ вихідної мережі (з лаб. №7)
+│   ├── Lab8Settings.cs                 # Router-и, selector, текст, трекер
 │   ├── DeploymentState.cs
 │   ├── ContractArtifact.cs
-│   ├── VaultResults.cs                 # результати кроків і звіти
+│   ├── CcipResults.cs                  # результати кроків і звіти
 │   └── Contracts/
-│       ├── AssetTokenDefinition.cs
-│       ├── UniswapRouterDefinition.cs
-│       └── VaultDefinition.cs
+│       ├── CrossChainMessengerDefinition.cs   # + DTO події MessageSent
+│       ├── CrossChainReceiverDefinition.cs
+│       └── LinkTokenDefinition.cs
 ├── Services/
-│   ├── Web3Factory.cs
+│   ├── Web3Factory.cs                  # два клієнти: L1 та L2, один ключ
 │   ├── ContractArtifactProvider.cs
 │   ├── DeploymentStateStore.cs
-│   ├── TokenService.cs                 # деплой, approve, balanceOf, transfer
-│   ├── RouterService.cs                # addLiquidity у зовнішньому DEX
-│   ├── VaultService.cs                 # deposit / withdraw / compound / знімок стану
-│   ├── ScenarioRunner.cs               # оркестрація життєвого циклу інвестора
-│   ├── KeeperBot.cs                    # автономний кіпер
+│   ├── LinkService.cs                  # balanceOf / transfer LINK
+│   ├── MessengerService.cs             # деплой, getFee, sendMessage, розбір MessageSent
+│   ├── ReceiverService.cs              # деплой у L2, читання lastMessage
+│   ├── ScenarioRunner.cs               # оркестрація контрольного завдання
+│   ├── DeliveryTracker.cs              # агент очікування доставки
 │   └── ConsoleReportRenderer.cs
 ├── Program.cs                          # DI, режими запуску, обробка помилок
 ├── appsettings.example.json
 ├── DeFi.csproj
-└── deployment-state-lab7.json          # генерується автоматично
+└── deployment-state-lab8.json          # генерується автоматично
 ```
 
 ---
 
 ## 3. Запуск
 
-### Крок 0. Мережа з Uniswap V2
+### Крок 0. Мережі, гаманець і кошти
 
-Як і в лаб. №4: публічний форк Uniswap V2 у Sepolia (адреса Router-а — з документації форку
-або від викладача) або локальний Hardhat-форк, де Uniswap V2 уже розгорнуто.
+1. У MetaMask додайте **Ethereum Sepolia** та **Arbitrum Sepolia** (Chain ID `11155111` і `421614`).
+2. Використовуйте лише **тестовий** гаманець. Ключ від гаманця з реальними коштами в конфіг класти не можна.
+3. Тестовий ETH для газу: у Sepolia — будь-який Sepolia faucet; в Arbitrum Sepolia — faucet або міст
+   із Sepolia (газ потрібен для деплою отримувача).
+4. Тестові LINK у Sepolia: https://faucets.chain.link/sepolia (орієнтовно 1–2 LINK достатньо).
+5. Адреси Router-ів, LINK та **Chain Selector**-и перевіряйте в довіднику CCIP Directory:
+   https://docs.chain.link/ccip/directory/testnet. Значення в `appsettings.example.json`
+   відповідають Sepolia → Arbitrum Sepolia на момент написання.
 
-### Крок 1. Компіляція контракту
+### Крок 1. Компіляція контрактів
 
-1. https://remix.ethereum.org → створити `AutoCompoundVault.sol` та `interfaces/IUniswapV2Router02.sol`.
-2. Solidity Compiler → `0.8.24+` → Compile (потрібен OpenZeppelin v5).
-3. З Compilation Details скопіювати `BYTECODE` (поле `object`) у ключ `bytecode`
-   файлу `contracts/artifacts/AutoCompoundVault.json`.
-4. `contracts/artifacts/AssetToken.json` скопіювати з лаб. №4 без змін.
+1. https://remix.ethereum.org → створити `CrossChainMessenger.sol` і `CrossChainReceiver.sol`.
+   Remix сам підтягне `@chainlink/contracts-ccip` і OpenZeppelin v5 з npm.
+   Локально в Hardhat/Foundry: `npm install @chainlink/contracts-ccip @openzeppelin/contracts`.
+2. Solidity Compiler → `0.8.24+` → Compile.
+3. З Compilation Details скопіювати `BYTECODE` (поле `object`) у ключ `bytecode` файлів
+   `contracts/artifacts/CrossChainMessenger.json` та `CrossChainReceiver.json`.
+   Порожнє значення `"0x"` клієнт відхилить з підказкою.
 
 ### Крок 2. Конфігурація
 
 Скопіювати `appsettings.example.json` → `appsettings.json` (файл у `.gitignore`), заповнити:
 
-- `Web3Settings:RpcUrl`, `ChainId`, `PrivateKey` — **тестовий** гаманець з ETH;
-- `Lab7Settings:RouterAddress` — адреса Router-а обраного DEX;
-- за потреби `DepositAmount` (1000), `RewardAmount` (100), `RewardThreshold`.
+- `Web3Settings:RpcUrl`, `ChainId` = `11155111`, `PrivateKey` — тестовий ключ (вихідна мережа);
+- `Lab8Settings:Source:RouterAddress` та `LinkTokenAddress` — Router і LINK у Sepolia;
+- `Lab8Settings:Destination` — RPC, `ChainId`, `ChainSelector`, `RouterAddress` цільової L2;
+- за потреби `MessageText` і `LinkFundingAmount`.
 
-### Крок 3. Життєвий цикл інвестора (контрольне завдання)
+### Крок 3. Відправка повідомлення (контрольне завдання)
 
 ```bash
 dotnet restore
@@ -135,60 +147,41 @@ dotnet run
 
 Сценарій:
 
-1. розгортає токени A/B (якщо їх ще немає) та наповнює пул A/B у зовнішньому DEX;
-2. розгортає `AutoCompoundVault`;
-3. вносить 1000 Токена A, виводить кількість отриманих акцій;
-4. надсилає 100 Токена B прямим ERC-20 переказом на сховище (імітація фарму);
-5. викликає `compound()`: Токен B продається за Токен A через Router;
-6. виводить `convertToAssets(баланс акцій)` до та після, знімає акції й доводить,
-   що знято більше, ніж внесено.
+1. розгортає `CrossChainReceiver` в Arbitrum Sepolia;
+2. розгортає `CrossChainMessenger` в Ethereum Sepolia;
+3. переказує LINK на баланс месенджера;
+4. питає в Router-а комісію (`getFee`);
+5. викликає `sendMessage`, дістає `messageId` з події `MessageSent` і друкує посилання на CCIP Explorer.
 
-Адреси зберігаються у `deployment-state-lab7.json`; повторний запуск не витрачає газ
-на повторний деплой.
+Адреси й останній `messageId` зберігаються у `deployment-state-lab8.json`; повторний запуск
+не витрачає газ на повторний деплой і просто відправляє нове повідомлення.
 
-### Крок 4 (необов'язково). Бот-кіпер
+### Крок 4. Агент очікування доставки
 
 ```bash
-dotnet run -- --stand      # підготовка стенду: деплой, пул, депозит (без compound)
-dotnet run -- --bot        # термінал №1: бот опитує balanceOf(vault) кожні 12 с
-dotnet run -- --donate     # термінал №2: імітація фарму — переказ винагороди
+dotnet run -- --track
 ```
 
-Приклад логу бота:
-
-```
-[12:04:19] Сховище 0x... | винагорода: 0 MFIAT
-[12:04:31] Сховище 0x... | винагорода: 100 MFIAT
-[12:04:31] [УВАГА] Винагорода перевищила поріг (10 MFIAT). Виклик compound()...
-[12:04:55] [УСПІХ] Реінвестування виконано. Tx: 0x...
-           Продано винагороди.: 100 MFIAT
-           Отримано активу....: 99.5005
-           totalAssets........: 1000 -> 1099.5005
-           Ціна акції.........: 1 -> 1.0995
-```
+Агент кожні 15 с читає `lastMessageId` отримувача в L2 і порівнює з `messageId`
+відправленого повідомлення. Тестова доставка зазвичай триває 10–30 хвилин, тому
+дефолтний таймаут — 40 хвилин. Якщо між відправкою та `--track` було надіслано ще одне
+повідомлення, трекер шукатиме саме останнє.
 
 ### Приклад виводу (скорочено, значення орієнтовні)
 
 ```
-КРОК 3. ДЕПОЗИТ У СХОВИЩЕ (deposit)
-  Внесено...............: 1000 RUBC
-  Отримано акцій........: 1000
-КРОК 4. ІМІТАЦІЯ ВИНАГОРОДИ
-  Надіслано.............: 100 MFIAT
-  Ціна 1 акції..........: 1 RUBC        ← не змінилась
-КРОК 5. РЕІНВЕСТУВАННЯ (compound)
-  Отримано активу.......: ≈99.5 RUBC
-  totalAssets...........: 1000 -> ≈1099.5 RUBC
-КРОК 6. ПЕРЕВІРКА ВАРТОСТІ АКЦІЙ
-  Вартість акцій ДО compound.: 1000 RUBC
-  Вартість акцій ПІСЛЯ.......: ≈1099.5 RUBC
-  [OK] Внесено 1000, знято ≈1099.5 RUBC.
-```
+КРОК 4. РОЗРАХУНОК КОМІСІЇ (Router.getFee)
+  Орієнтовна комісія....: 0.0412 LINK
+КРОК 5. ВІДПРАВКА ПОВІДОМЛЕННЯ (sendMessage -> Router.ccipSend)
+  Текст.................: Привіт з Ethereum Sepolia! Лаб. робота №8, Рубан Андрій, ПДМ-61
+  Списано комісії.......: 0.0412 LINK
+  messageId.............: 0x9f3a...c41e
+  CCIP Explorer.........: https://ccip.chain.link/msg/0x9f3a...c41e
 
-Пояснення до цифр: при першому депозиті 1000 wei акцій спалюються (`MINIMUM_SHARES`),
-тому інвестор отримує на 10⁻¹⁵ акції менше (у консолі це округлюється до 8 знаків).
-Прибуток залежить від глибини пулу: винагорода 100 B у пулі 50 000 / 50 000 з комісією 0.3%
-обмінюється приблизно на 99.5 A.
+[12:04:19] Отримувач | повідомлень ще немає
+[12:19:34] [УСПІХ] Повідомлення доставлено в цільову мережу.
+  [OK] Status: Success — контракт-отримувач у цільовій мережі зберіг повідомлення.
+```
 
 ---
 
@@ -196,25 +189,75 @@ dotnet run -- --donate     # термінал №2: імітація фарму 
 
 | Вимога | Реалізація |
 |---|---|
-| Розгорнути `AutoCompoundVault` з адресами двох токенів і Router-а | `VaultService.DeployAsync` → конструктор `(asset_, rewardToken_, router_)` |
-| Імітація винагороди прямим переказом Токена B | `ScenarioRunner.TransferRewardAsync` (`ERC-20 transfer` на адресу сховища) |
-| Депозит 1000 одиниць, вивід отриманих акцій | `DepositStepAsync` (акції = приріст балансу `balanceOf`) |
-| Виклик `compound()`, що продає Токен B за Токен A | `VaultService.CompoundAsync` |
-| Перевірка `convertToAssets(баланс акцій)` | `VaultService.GetSnapshotAsync`, звіт кроку 6 |
-| Доказ: знімаємо більше, ніж поклали | `withdraw` + перевірка `Withdraw.Assets > Deposit.Assets` |
-| Off-chain автоматизація (Keeper) | `KeeperBot`, режим `--bot` |
+| Налаштувати L2-мережу (MetaMask, конфіг, крани) | Крок 0; `Lab8Settings:Destination`, `Web3Factory.DestinationClient` |
+| Розгорнути `CrossChainMessenger` у Sepolia з адресами Router і LINK | `MessengerService.DeployAsync` → конструктор `(router_, link_)` |
+| Розгорнути контракт-пустушку-отримувач у L2 | `CrossChainReceiver`, `ReceiverService.DeployAsync` |
+| Поповнити баланс месенджера LINK | `ScenarioRunner.EnsureMessengerFundedAsync` (`LinkService.TransferAsync`) |
+| Запустити скрипт, що викликає `sendMessage` | `MessengerService.SendMessageAsync`, розбір `MessageSent` → `messageId` |
+| Підтвердження Status: Success | CCIP Explorer за `messageId` + агент `--track` |
 
-**У звіті:** лістинг `AutoCompoundVault.sol`, код клієнта (`ScenarioRunner.cs`, `VaultService.cs`,
-`KeeperBot.cs`) та скриншоти консолі (кроки 3, 4, 5, 6 — зміна вартості акцій).
+**У звіті:** лістинги `CrossChainMessenger.sol`, `CrossChainReceiver.sol`, код клієнта
+(`ScenarioRunner.cs`, `MessengerService.cs`, `DeliveryTracker.cs`), скриншот консолі
+з `messageId` та скриншот CCIP Explorer зі статусом **Success** (Sepolia → Arbitrum Sepolia).
 
 ---
 
-## 5. Технологічний стек
+## 5. Контрольні запитання
+
+**Поясніть різницю між підходами до масштабування Optimistic Rollups та Zero-Knowledge (ZK) Rollups.**
+
+Обидва підходи виконують транзакції поза L1, а на L1 публікують стиснуті дані та новий стан,
+але по-різному доводять його коректність. Optimistic Rollups (Arbitrum, Optimism, Base)
+«оптимістично» вважають кожен пакет правильним. Протягом вікна оскарження (приблизно 7 днів)
+будь-який спостерігач може подати fraud proof, і тоді некоректний стан відкочується.
+Звідси затримка виведення коштів на L1, зате прості обчислення та повна EVM-еквівалентність.
+ZK Rollups (zkSync, Scroll, Starknet) разом із пакетом публікують криптографічне доказове
+свідчення валідності (SNARK/STARK), яке L1-контракт перевіряє одразу. Фіналізація на L1 швидка,
+і довіра до чесності спостерігачів не потрібна. Ціна — складна й дорога генерація доказів
+і складніша сумісність з EVM.
+
+**Чому при розробці бекенд-сервісу для L2-мережі (наприклад, Arbitrum) не потрібно вивчати нові мови програмування або нові бібліотеки замість Nethereum чи ethers.js?**
+
+EVM-сумісні L2 виконують той самий байткод, використовують той самий формат транзакцій,
+ABI-кодування та JSON-RPC API (`eth_call`, `eth_sendRawTransaction`, `eth_getLogs`), що й L1.
+Тому Nethereum, ethers.js чи go-ethereum працюють без змін. Саме це демонструє наш клієнт:
+`Web3Factory` створює другий `Web3` лише з іншим `RpcUrl` і `ChainId`, а адреса акаунта та
+сервіси залишаються тими самими. Нюанси є лише на рівні економіки й середовища (окрема
+модель комісій із витратами на публікацію даних у L1, особливості `block.number`), але не
+на рівні інструментів.
+
+**Яку функцію виконує ідентифікатор цільової мережі (Destination Chain Selector) у протоколі CCIP, і чому не використовується стандартний Chain ID з EVM?**
+
+Chain Selector — це `uint64`-ідентифікатор мережі, який присвоює сам CCIP. Разом із
+ідентифікатором мережі-відправника він задає напрямок (lane), тобто пару Router-ів, між
+якими ходять повідомлення, і за ним Router вирішує, чи підтримується такий маршрут.
+Chain ID не підходить, бо це поняття лише EVM. CCIP працює й з не-EVM мережами (Solana,
+Aptos), де EVM Chain ID не існує, а його унікальність у різних сімействах мереж не
+гарантована. Єдиний простір селекторів, що контролюється протоколом, дає однозначну
+й уніфіковану адресацію будь-яких блокчейнів і не залежить від змін Chain ID у форках.
+Тому в `appsettings.json` є окремі `ChainId` (для підпису транзакцій у L2) і `ChainSelector`
+(для CCIP).
+
+**Чому крос-чейн транзакції вимагають сплати комісії не лише за виконання запиту в поточній мережі, але й окремої комісії для маршрутизатора (через токен LINK або додатковий нативний актив)?**
+
+Користувач сплачує газ лише за транзакцію у вихідній мережі (`ccipSend`). Виконання
+повідомлення в цільовій мережі ініціює не він, а мережа оракулів, яка надсилає там власну
+транзакцію і сама витрачає газ. Оскільки в користувача немає транзакції в цільовій мережі,
+вартість виконання потрібно передплатити у вихідній. Комісія CCIP складається з вартості газу
+виконання в цільовій мережі (`gasLimit` × поточна ціна газу), винагороди децентралізованих
+мереж оракулів, які підтверджують і виконують повідомлення (committing та executing DON,
+Risk Management Network), та надбавки за обсяг даних. Router динамічно розраховує її через
+`getFee`, а оплата йде в LINK або нативним активом. У нашому контракті комісія списується
+з LINK-балансу контракту, тому його попередньо поповнюють.
+
+---
+
+## 6. Технологічний стек
 
 | Шар | Технологія |
 |---|---|
-| Смарт-контракти | Solidity 0.8.24, OpenZeppelin v5 (ERC20, SafeERC20, ReentrancyGuard) |
-| Зовнішній протокол | Uniswap V2 Router02 (композитність, лаб. №4) |
-| Мережа | Sepolia або Hardhat-форк із розгорнутим Uniswap V2 |
-| Клієнт та кіпер | C# (.NET 8), Nethereum 4.29, Microsoft.Extensions (DI, Options, Configuration) |
-| Стан деплою | `deployment-state-lab7.json` |
+| Смарт-контракти | Solidity 0.8.24, OpenZeppelin v5 (Ownable, SafeERC20), Chainlink CCIP (`IRouterClient`, `CCIPReceiver`) |
+| Мережі | Ethereum Sepolia (L1) → Arbitrum Sepolia (L2, Optimistic Rollup) |
+| Крос-чейн протокол | Chainlink CCIP, оплата комісії в LINK |
+| Клієнт та агент | C# (.NET 8), Nethereum 4.29, Microsoft.Extensions (DI, Options, Configuration) |
+| Стан деплою | `deployment-state-lab8.json` |

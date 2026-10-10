@@ -8,9 +8,7 @@ public interface IReportRenderer
 {
     string Render(ScenarioReport report);
 
-    string Render(StandReport report);
-
-    string Render(DonationReport report);
+    string Render(DeliveryReport report);
 }
 
 public sealed class ConsoleReportRenderer : IReportRenderer
@@ -20,142 +18,95 @@ public sealed class ConsoleReportRenderer : IReportRenderer
     public string Render(ScenarioReport report)
     {
         var sb = new StringBuilder();
-        var assetSymbol = report.TokenA.Symbol;
-        var rewardSymbol = report.TokenB.Symbol;
 
-        RenderInfrastructure(sb, report.Network, report.UserAddress, report.RouterAddress,
-            report.TokenA, report.TokenB, report.Pool, report.Vault);
+        Header(sb, "МЕРЕЖІ ТА АКАУНТ");
+        sb.AppendLine($"  Вихідна мережа (L1)...: {report.SourceNetwork}");
+        sb.AppendLine($"  Цільова мережа (L2)...: {report.DestinationNetwork}");
+        sb.AppendLine($"  Chain Selector (CCIP).: {report.DestinationChainSelector}");
+        sb.AppendLine($"  Акаунт (однаковий у L1 і L2): {report.DeployerAddress}");
 
-        Header(sb, "КРОК 3. ДЕПОЗИТ У СХОВИЩЕ (deposit)");
-        sb.AppendLine($"  Внесено...............: {Num(report.Deposit.Assets)} {assetSymbol}");
-        sb.AppendLine($"  Отримано акцій........: {Num(report.Deposit.Shares)} {report.Vault.Address[..8]}… (shares)");
-        sb.AppendLine($"  Транзакція............: {report.Deposit.TransactionHash} (gas: {report.Deposit.GasUsed})");
-        RenderPosition(sb, report.PositionAfterDeposit, assetSymbol);
-
-        Header(sb, "КРОК 4. ІМІТАЦІЯ ВИНАГОРОДИ (прямий ERC-20 переказ на сховище)");
-        sb.AppendLine($"  Надіслано.............: {Num(report.Reward.Amount)} {rewardSymbol}");
-        sb.AppendLine($"  Баланс винагороди.....: {Num(report.Reward.RewardBalanceInVault)} {rewardSymbol}");
-        sb.AppendLine($"  Транзакція............: {report.Reward.TransactionHash}");
-        RenderPosition(sb, report.PositionAfterReward, assetSymbol);
-        sb.AppendLine();
-        sb.AppendLine("  Зверніть увагу: ціна акції не змінилась — токени винагороди ще не входять у totalAssets().");
-
-        Header(sb, "КРОК 5. РЕІНВЕСТУВАННЯ (compound -> Router.swapExactTokensForTokens)");
-        sb.AppendLine($"  Продано винагороди....: {Num(report.Compound.RewardSold)} {rewardSymbol}");
-        sb.AppendLine($"  Отримано активу.......: {Num(report.Compound.AssetsReceived)} {assetSymbol}");
-        sb.AppendLine($"  totalAssets...........: {Num(report.Compound.TotalAssetsBefore)} -> {Num(report.Compound.TotalAssetsAfter)} {assetSymbol}");
-        sb.AppendLine($"  Транзакція............: {report.Compound.TransactionHash} (gas: {report.Compound.GasUsed})");
-        RenderPosition(sb, report.PositionAfterCompound, assetSymbol);
-
-        Header(sb, "КРОК 6. ПЕРЕВІРКА ВАРТОСТІ АКЦІЙ (convertToAssets) ТА ЗНЯТТЯ (withdraw)");
-        sb.AppendLine($"  Вартість акцій ДО compound.: {Num(report.PositionAfterReward.AssetsValue)} {assetSymbol}");
-        sb.AppendLine($"  Вартість акцій ПІСЛЯ.......: {Num(report.PositionAfterCompound.AssetsValue)} {assetSymbol}");
-        sb.AppendLine($"  Спалено акцій.........: {Num(report.Withdraw.Shares)}");
-        sb.AppendLine($"  Отримано активу.......: {Num(report.Withdraw.Assets)} {assetSymbol}");
-        sb.AppendLine($"  Транзакція............: {report.Withdraw.TransactionHash} (gas: {report.Withdraw.GasUsed})");
-
-        var profit = report.Withdraw.Assets - report.Deposit.Assets;
-        var percent = report.Deposit.Assets == 0m ? 0m : profit / report.Deposit.Assets * 100m;
-
-        sb.AppendLine();
-        sb.AppendLine($"  [OK] Внесено {Num(report.Deposit.Assets)}, знято {Num(report.Withdraw.Assets)} {assetSymbol}.");
-        sb.AppendLine($"       Прибуток від компаундингу: +{Num(profit)} {assetSymbol} (+{percent.ToString("0.####", Culture)}%).");
-        sb.AppendLine();
-        sb.AppendLine("Auto-compounding підтверджено: кількість акцій не змінилась, але totalAssets зріс,");
-        sb.AppendLine("тому кожна акція подорожчала, і інвестор може зняти більше, ніж поклав.");
-        sb.AppendLine();
-
-        return sb.ToString();
-    }
-
-    public string Render(StandReport report)
-    {
-        var sb = new StringBuilder();
-        var assetSymbol = report.TokenA.Symbol;
-
-        RenderInfrastructure(sb, report.Network, report.UserAddress, report.RouterAddress,
-            report.TokenA, report.TokenB, report.Pool, report.Vault);
-
-        Header(sb, "КРОК 3. ДЕПОЗИТ У СХОВИЩЕ (deposit)");
-        sb.AppendLine($"  Внесено...............: {Num(report.Deposit.Assets)} {assetSymbol}");
-        sb.AppendLine($"  Отримано акцій........: {Num(report.Deposit.Shares)}");
-        sb.AppendLine($"  Транзакція............: {report.Deposit.TransactionHash} (gas: {report.Deposit.GasUsed})");
-        RenderPosition(sb, report.PositionAfterDeposit, assetSymbol);
-
-        sb.AppendLine();
-        sb.AppendLine("Стенд готовий. Далі, у двох окремих терміналах:");
-        sb.AppendLine("  1) dotnet run -- --bot      (запустити бота-кіпера)");
-        sb.AppendLine("  2) dotnet run -- --donate   (імітація фарму: переказ винагороди на сховище)");
-        sb.AppendLine();
-
-        return sb.ToString();
-    }
-
-    public string Render(DonationReport report)
-    {
-        var sb = new StringBuilder();
-
-        Header(sb, "ІМІТАЦІЯ ФАРМУ (прямий переказ винагороди на сховище)");
-        sb.AppendLine($"  Мережа................: {report.Network}");
-        sb.AppendLine($"  Сховище...............: {report.VaultAddress}");
-        sb.AppendLine($"  Надіслано.............: {Num(report.Reward.Amount)} {report.RewardSymbol}");
-        sb.AppendLine($"  Баланс винагороди.....: {Num(report.Reward.RewardBalanceInVault)} {report.RewardSymbol}");
-        sb.AppendLine($"  Транзакція............: {report.Reward.TransactionHash}");
-        sb.AppendLine();
-        sb.AppendLine("  Бот-кіпер має помітити винагороду й викликати compound().");
-        sb.AppendLine();
-
-        return sb.ToString();
-    }
-
-    private static void RenderInfrastructure(
-        StringBuilder sb, string network, string user, string router,
-        TokenDeploymentResult tokenA, TokenDeploymentResult tokenB,
-        LiquidityResult? pool, VaultDeploymentResult vault)
-    {
-        Header(sb, "МЕРЕЖА ТА АКАУНТ");
-        sb.AppendLine($"  Мережа................: {network}");
-        sb.AppendLine($"  Інвестор..............: {user}");
-        sb.AppendLine($"  Router (зовнішній DEX): {router}");
-
-        Header(sb, "КРОК 1. ТОКЕНИ ТА ПУЛ ЛІКВІДНОСТІ У ЗОВНІШНЬОМУ DEX");
-        RenderToken(sb, tokenA, "Токен A (базовий актив)");
-        RenderToken(sb, tokenB, "Токен B (винагорода)");
-        if (pool is null)
+        Header(sb, "КРОК 1. КОНТРАКТ-ОТРИМУВАЧ У ЦІЛЬОВІЙ L2 (CrossChainReceiver)");
+        sb.AppendLine($"  Адреса................: {report.Receiver.Address}");
+        sb.AppendLine($"  CCIP Router (L2)......: {report.Receiver.RouterAddress}");
+        sb.AppendLine($"  Статус................: {Status(report.Receiver.WasAlreadyDeployed)}");
+        if (report.Receiver.TransactionHash is not null)
         {
-            sb.AppendLine("  Пул A/B...............: уже наповнений раніше (addLiquidity пропущено)");
+            sb.AppendLine($"  Транзакція деплою.....: {report.Receiver.TransactionHash}");
+        }
+
+        Header(sb, "КРОК 2. МІЖМЕРЕЖЕВИЙ МЕСЕНДЖЕР У ВИХІДНІЙ МЕРЕЖІ (CrossChainMessenger)");
+        sb.AppendLine($"  Адреса................: {report.Messenger.Address}");
+        sb.AppendLine($"  CCIP Router (L1)......: {report.Messenger.RouterAddress}");
+        sb.AppendLine($"  Токен комісії (LINK)..: {report.Messenger.LinkTokenAddress}");
+        sb.AppendLine($"  Статус................: {Status(report.Messenger.WasAlreadyDeployed)}");
+        if (report.Messenger.TransactionHash is not null)
+        {
+            sb.AppendLine($"  Транзакція деплою.....: {report.Messenger.TransactionHash}");
+        }
+
+        Header(sb, "КРОК 3. ПОПОВНЕННЯ LINK-БАЛАНСУ МЕСЕНДЖЕРА");
+        if (report.Funding.TransactionHash is null)
+        {
+            sb.AppendLine("  Пропущено.............: на балансі контракту вже достатньо LINK");
         }
         else
         {
-            sb.AppendLine($"  Пул A/B...............: {Num(pool.AmountA)} {tokenA.Symbol} + {Num(pool.AmountB)} {tokenB.Symbol}");
-            sb.AppendLine($"    Транзакція..........: {pool.TransactionHash} (gas: {pool.GasUsed})");
+            sb.AppendLine($"  Надіслано.............: {Num(report.Funding.Sent)} LINK");
+            sb.AppendLine($"  Транзакція............: {report.Funding.TransactionHash}");
         }
+        sb.AppendLine($"  Баланс месенджера.....: {Num(report.Funding.MessengerBalance)} LINK");
+        sb.AppendLine($"  Баланс гаманця........: {Num(report.Funding.DeployerBalance)} LINK");
 
-        Header(sb, "КРОК 2. РОЗГОРТАННЯ СХОВИЩА (AutoCompoundVault)");
-        sb.AppendLine($"  Адреса сховища........: {vault.Address}");
-        sb.AppendLine($"  Статус................: {(vault.WasAlreadyDeployed ? "перевикористано з файлу стану" : "розгорнуто щойно")}");
-        if (vault.TransactionHash is not null)
+        Header(sb, "КРОК 4. РОЗРАХУНОК КОМІСІЇ (Router.getFee)");
+        sb.AppendLine($"  Орієнтовна комісія....: {Num(report.EstimatedFeeLink)} LINK");
+
+        Header(sb, "КРОК 5. ВІДПРАВКА ПОВІДОМЛЕННЯ (sendMessage -> Router.ccipSend)");
+        sb.AppendLine($"  Текст.................: {report.Send.Text}");
+        sb.AppendLine($"  Списано комісії.......: {Num(report.Send.FeeLink)} LINK");
+        sb.AppendLine($"  Транзакція............: {report.Send.TransactionHash} (gas: {report.Send.GasUsed})");
+        sb.AppendLine($"  Блок..................: {report.Send.BlockNumber}");
+        sb.AppendLine($"  messageId.............: {report.Send.MessageId}");
+        sb.AppendLine($"  CCIP Explorer.........: {report.ExplorerUrl}");
+
+        sb.AppendLine();
+        sb.AppendLine("Повідомлення поставлено в чергу децентралізованої мережі оракулів. Доставка асинхронна");
+        sb.AppendLine("і триває кілька хвилин. Для автоматичного очікування виконайте: dotnet run -- --track");
+        sb.AppendLine();
+
+        return sb.ToString();
+    }
+
+    public string Render(DeliveryReport report)
+    {
+        var sb = new StringBuilder();
+
+        Header(sb, "СТАТУС ДОСТАВКИ МІЖМЕРЕЖЕВОГО ПОВІДОМЛЕННЯ");
+        sb.AppendLine($"  Цільова мережа........: {report.DestinationNetwork}");
+        sb.AppendLine($"  Отримувач.............: {report.ReceiverAddress}");
+        sb.AppendLine($"  messageId.............: {report.MessageId}");
+        sb.AppendLine($"  Час очікування........: {report.Elapsed:mm\\:ss}");
+        sb.AppendLine($"  CCIP Explorer.........: {report.ExplorerUrl}");
+
+        sb.AppendLine();
+        if (report.Delivered && report.Received is not null)
         {
-            sb.AppendLine($"  Транзакція деплою.....: {vault.TransactionHash}");
+            sb.AppendLine("  [OK] Status: Success — контракт-отримувач у цільовій мережі зберіг повідомлення.");
+            sb.AppendLine($"       Текст.............: {report.Received.Text}");
+            sb.AppendLine($"       Відправник (L1)...: {report.Received.Sender}");
+            sb.AppendLine($"       Source selector...: {report.Received.SourceChainSelector}");
         }
+        else
+        {
+            sb.AppendLine("  [УВАГА] Доставку не підтверджено за відведений час. Перевірте статус у CCIP Explorer");
+            sb.AppendLine("          (можливо, потрібне ручне виконання через брак gasLimit) або запустіть --track ще раз.");
+        }
+        sb.AppendLine();
+
+        return sb.ToString();
     }
 
-    private static void RenderToken(StringBuilder sb, TokenDeploymentResult token, string label)
-    {
-        sb.AppendLine($"  {label}: {token.Name} ({token.Symbol})");
-        sb.AppendLine($"    Адреса..............: {token.Address}");
-        sb.AppendLine($"    Статус..............: {(token.WasAlreadyDeployed ? "перевикористано" : "розгорнуто щойно")}");
-    }
-
-    private static void RenderPosition(StringBuilder sb, VaultSnapshot position, string assetSymbol)
-    {
-        sb.AppendLine("  Стан сховища та позиції:");
-        sb.AppendLine($"    Акції інвестора.....: {Num(position.Shares)}");
-        sb.AppendLine($"    convertToAssets.....: {Num(position.AssetsValue)} {assetSymbol}");
-        sb.AppendLine($"    totalAssets.........: {Num(position.TotalAssets)} {assetSymbol}");
-        sb.AppendLine($"    totalSupply акцій...: {Num(position.TotalShares)}");
-        sb.AppendLine($"    Ціна 1 акції........: {Num(position.SharePrice)} {assetSymbol}");
-    }
+    private static string Status(bool wasAlreadyDeployed) =>
+        wasAlreadyDeployed ? "перевикористано з файлу стану" : "розгорнуто щойно";
 
     private static void Header(StringBuilder sb, string title)
     {

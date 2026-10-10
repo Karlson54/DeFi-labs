@@ -1,4 +1,3 @@
-using System.Numerics;
 using DeFi.Models;
 using Microsoft.Extensions.Options;
 using Nethereum.Web3;
@@ -8,269 +7,202 @@ namespace DeFi.Services;
 public interface IScenarioRunner
 {
     Task<ScenarioReport> RunAsync(CancellationToken cancellationToken = default);
-
-    Task<StandReport> PrepareStandAsync(CancellationToken cancellationToken = default);
-
-    Task<DonationReport> DonateRewardAsync(CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Оркестрація контрольного завдання: receiver у L2 -> messenger у L1 ->
+/// поповнення LINK -> розрахунок комісії -> sendMessage.
+/// </summary>
 public sealed class ScenarioRunner : IScenarioRunner
 {
-    private const int Decimals = 18;
-
     private readonly IWeb3Factory _web3Factory;
-    private readonly ITokenService _tokenService;
-    private readonly IRouterService _routerService;
-    private readonly IVaultService _vaultService;
+    private readonly IReceiverService _receiverService;
+    private readonly IMessengerService _messengerService;
+    private readonly ILinkService _linkService;
     private readonly IDeploymentStateStore _stateStore;
-    private readonly Lab7Settings _settings;
+    private readonly Lab8Settings _settings;
 
     public ScenarioRunner(
         IWeb3Factory web3Factory,
-        ITokenService tokenService,
-        IRouterService routerService,
-        IVaultService vaultService,
+        IReceiverService receiverService,
+        IMessengerService messengerService,
+        ILinkService linkService,
         IDeploymentStateStore stateStore,
-        IOptions<Lab7Settings> settingsOptions)
+        IOptions<Lab8Settings> settingsOptions)
     {
         _web3Factory = web3Factory;
-        _tokenService = tokenService;
-        _routerService = routerService;
-        _vaultService = vaultService;
+        _receiverService = receiverService;
+        _messengerService = messengerService;
+        _linkService = linkService;
         _stateStore = stateStore;
         _settings = settingsOptions.Value;
     }
-
-    private sealed record Infrastructure(
-        TokenDeploymentResult TokenA,
-        TokenDeploymentResult TokenB,
-        LiquidityResult? Pool,
-        VaultDeploymentResult Vault);
 
     public async Task<ScenarioReport> RunAsync(CancellationToken cancellationToken = default)
     {
         ValidateSettings();
 
         var user = _web3Factory.AccountAddress;
-        var infra = await PrepareInfrastructureAsync(user, cancellationToken);
-        var vault = infra.Vault.Address;
+        var chainId = _web3Factory.ChainId;
+        var source = _settings.Source;
+        var destination = _settings.Destination;
 
-        var (deposit, sharesWei, afterDeposit) = await DepositStepAsync(infra, user, cancellationToken);
+        var state = await _stateStore.LoadAsync(chainId, user, cancellationToken);
 
-        var reward = await TransferRewardAsync(infra, cancellationToken);
-        var afterReward = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
+        // Крок 1. Контракт-отримувач у цільовій L2-мережі.
+        // Якщо Router у налаштуваннях змінився — старий контракт непридатний, розгортаємо новий.
+        var knownReceiver = SameAddress(state.DestinationRouterAddress, destination.RouterAddress)
+            ? state.ReceiverAddress
+            : null;
+        var receiver = await EnsureReceiverAsync(knownReceiver, cancellationToken);
+        state = state with { ReceiverAddress = receiver.Address, DestinationRouterAddress = destination.RouterAddress };
+        await _stateStore.SaveAsync(state, cancellationToken);
 
-        var rewardWei = await _tokenService.BalanceOfAsync(infra.TokenB.Address, vault, cancellationToken);
-        var compound = await _vaultService.CompoundAsync(vault, rewardWei, cancellationToken);
-        var afterCompound = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
-
-        var balanceBefore = await _tokenService.BalanceOfAsync(infra.TokenA.Address, user, cancellationToken);
-        var withdrawTx = await _vaultService.WithdrawAsync(vault, sharesWei, cancellationToken);
-        var balanceAfter = await _tokenService.BalanceOfAsync(infra.TokenA.Address, user, cancellationToken);
-
-        var withdraw = new WithdrawResult(
-            Web3.Convert.FromWei(sharesWei, Decimals),
-            Web3.Convert.FromWei(balanceAfter - balanceBefore, Decimals),
-            withdrawTx.TransactionHash,
-            withdrawTx.GasUsed);
-
-        var final = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
-
-        if (withdraw.Assets <= deposit.Assets)
-        {
-            throw new InvalidOperationException(
-                "КРИТИЧНО: після compound() інвестор отримав не більше, ніж вніс. " +
-                "Перевірте, що compound() обміняв винагороду на базовий актив і залишив її у сховищі (to = address(this)).");
-        }
-
-        return new ScenarioReport(
-            Network: $"chainId {_web3Factory.ChainId}",
-            UserAddress: user,
-            RouterAddress: _settings.RouterAddress,
-            TokenA: infra.TokenA,
-            TokenB: infra.TokenB,
-            Pool: infra.Pool,
-            Vault: infra.Vault,
-            Deposit: deposit,
-            PositionAfterDeposit: afterDeposit,
-            Reward: reward,
-            PositionAfterReward: afterReward,
-            Compound: compound,
-            PositionAfterCompound: afterCompound,
-            Withdraw: withdraw,
-            FinalPosition: final);
-    }
-
-    public async Task<StandReport> PrepareStandAsync(CancellationToken cancellationToken = default)
-    {
-        ValidateSettings();
-
-        var user = _web3Factory.AccountAddress;
-        var infra = await PrepareInfrastructureAsync(user, cancellationToken);
-        var (deposit, _, afterDeposit) = await DepositStepAsync(infra, user, cancellationToken);
-
-        return new StandReport(
-            Network: $"chainId {_web3Factory.ChainId}",
-            UserAddress: user,
-            RouterAddress: _settings.RouterAddress,
-            TokenA: infra.TokenA,
-            TokenB: infra.TokenB,
-            Pool: infra.Pool,
-            Vault: infra.Vault,
-            Deposit: deposit,
-            PositionAfterDeposit: afterDeposit);
-    }
-
-    public async Task<DonationReport> DonateRewardAsync(CancellationToken cancellationToken = default)
-    {
-        ValidateSettings();
-
-        var user = _web3Factory.AccountAddress;
-        var state = await _stateStore.LoadAsync(_web3Factory.ChainId, user, cancellationToken);
-
-        if (string.IsNullOrWhiteSpace(state.VaultAddress) || string.IsNullOrWhiteSpace(state.TokenBAddress) ||
-            !await HasContractCodeAsync(state.VaultAddress))
-        {
-            throw new InvalidOperationException(
-                "Сховище ще не розгорнуте. Спочатку підготуйте стенд: dotnet run -- --stand");
-        }
-
-        var tx = await _tokenService.TransferAsync(state.TokenBAddress!, state.VaultAddress!, _settings.RewardAmount, cancellationToken);
-        var balanceWei = await _tokenService.BalanceOfAsync(state.TokenBAddress!, state.VaultAddress!, cancellationToken);
-
-        return new DonationReport(
-            Network: $"chainId {_web3Factory.ChainId}",
-            VaultAddress: state.VaultAddress!,
-            RewardSymbol: _settings.TokenB.Symbol,
-            Reward: new RewardTransferResult(_settings.RewardAmount, Web3.Convert.FromWei(balanceWei, Decimals), tx));
-    }
-
-    private async Task<Infrastructure> PrepareInfrastructureAsync(string user, CancellationToken cancellationToken)
-    {
-        var state = await _stateStore.LoadAsync(_web3Factory.ChainId, user, cancellationToken);
-
-        var tokenA = await EnsureTokenAsync(_settings.TokenA, state.TokenAAddress, cancellationToken);
-        var tokenB = await EnsureTokenAsync(_settings.TokenB, state.TokenBAddress, cancellationToken);
-
-        var tokensChanged = !tokenA.WasAlreadyDeployed || !tokenB.WasAlreadyDeployed;
-        var routerChanged = !string.Equals(state.RouterAddress, _settings.RouterAddress, StringComparison.OrdinalIgnoreCase);
-
-        if (tokensChanged || routerChanged)
-        {
-            state = state with { VaultAddress = null, LiquidityProvided = false };
-        }
-
+        // Крок 2. Месенджер у вихідній мережі (immutable router/link -> зміна адрес = новий деплой).
+        var knownMessenger =
+            SameAddress(state.SourceRouterAddress, source.RouterAddress) &&
+            SameAddress(state.LinkTokenAddress, source.LinkTokenAddress)
+                ? state.MessengerAddress
+                : null;
+        var messenger = await EnsureMessengerAsync(knownMessenger, cancellationToken);
         state = state with
         {
-            TokenAAddress = tokenA.Address,
-            TokenBAddress = tokenB.Address,
-            RouterAddress = _settings.RouterAddress
+            MessengerAddress = messenger.Address,
+            SourceRouterAddress = source.RouterAddress,
+            LinkTokenAddress = source.LinkTokenAddress
         };
         await _stateStore.SaveAsync(state, cancellationToken);
 
-        LiquidityResult? pool = null;
-        if (!state.LiquidityProvided)
+        // Крок 3. Поповнення LINK-балансу контракту (комісію платить саме він).
+        var funding = await EnsureMessengerFundedAsync(messenger.Address, user, cancellationToken);
+
+        // Крок 4. Комісія оракулів: view-запит до Router-а через контракт, газ не витрачається.
+        var fee = await _messengerService.GetFeeAsync(
+            messenger.Address, destination.ChainSelector, receiver.Address, _settings.MessageText, cancellationToken);
+
+        if (fee > funding.MessengerBalance)
         {
-            await _tokenService.ApproveAsync(tokenA.Address, _settings.RouterAddress, _settings.PoolLiquidityA, cancellationToken);
-            await _tokenService.ApproveAsync(tokenB.Address, _settings.RouterAddress, _settings.PoolLiquidityB, cancellationToken);
-
-            pool = await _routerService.AddLiquidityAsync(
-                tokenA.Address, tokenB.Address,
-                _settings.PoolLiquidityA, _settings.PoolLiquidityB,
-                user, cancellationToken);
-
-            state = state with { LiquidityProvided = true };
-            await _stateStore.SaveAsync(state, cancellationToken);
+            throw new InvalidOperationException(
+                $"Комісія CCIP ({fee} LINK) перевищує баланс контракту-месенджера ({funding.MessengerBalance} LINK). " +
+                "Збільште Lab8Settings:LinkFundingAmount.");
         }
 
-        var vault = await EnsureVaultAsync(state.VaultAddress, tokenA.Address, tokenB.Address, cancellationToken);
-        state = state with { VaultAddress = vault.Address };
+        // Крок 5. Відправка повідомлення.
+        var send = await _messengerService.SendMessageAsync(
+            messenger.Address, destination.ChainSelector, receiver.Address, _settings.MessageText, cancellationToken);
+
+        state = state with { LastMessageId = send.MessageId };
         await _stateStore.SaveAsync(state, cancellationToken);
 
-        return new Infrastructure(tokenA, tokenB, pool, vault);
-    }
-
-    private async Task<(DepositResult Deposit, BigInteger SharesWei, VaultSnapshot After)> DepositStepAsync(
-        Infrastructure infra, string user, CancellationToken cancellationToken)
-    {
-        var vault = infra.Vault.Address;
-
-        var before = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
-
-        await _tokenService.ApproveAsync(infra.TokenA.Address, vault, _settings.DepositAmount, cancellationToken);
-        var tx = await _vaultService.DepositAsync(vault, _settings.DepositAmount, cancellationToken);
-
-        var after = await _vaultService.GetSnapshotAsync(vault, user, cancellationToken);
-
-        var sharesWei = after.SharesWei - before.SharesWei;
-
-        var deposit = new DepositResult(
-            _settings.DepositAmount,
-            Web3.Convert.FromWei(sharesWei, Decimals),
-            tx.TransactionHash,
-            tx.GasUsed);
-
-        return (deposit, sharesWei, after);
-    }
-
-    private async Task<RewardTransferResult> TransferRewardAsync(Infrastructure infra, CancellationToken cancellationToken)
-    {
-        var tx = await _tokenService.TransferAsync(
-            infra.TokenB.Address, infra.Vault.Address, _settings.RewardAmount, cancellationToken);
-
-        var balanceWei = await _tokenService.BalanceOfAsync(infra.TokenB.Address, infra.Vault.Address, cancellationToken);
-
-        return new RewardTransferResult(_settings.RewardAmount, Web3.Convert.FromWei(balanceWei, Decimals), tx);
+        return new ScenarioReport(
+            SourceNetwork: $"chainId {chainId}",
+            DestinationNetwork: $"{destination.Name} (chainId {destination.ChainId})",
+            DeployerAddress: user,
+            DestinationChainSelector: destination.ChainSelector,
+            Receiver: receiver,
+            Messenger: messenger,
+            Funding: funding,
+            EstimatedFeeLink: fee,
+            Send: send,
+            ExplorerUrl: _settings.ExplorerMessageUrl + send.MessageId);
     }
 
     private void ValidateSettings()
     {
-        if (string.IsNullOrWhiteSpace(_settings.RouterAddress) ||
-            _settings.RouterAddress.StartsWith("0x_", StringComparison.OrdinalIgnoreCase))
+        RequireAddress(_settings.Source.RouterAddress, "Lab8Settings:Source:RouterAddress");
+        RequireAddress(_settings.Source.LinkTokenAddress, "Lab8Settings:Source:LinkTokenAddress");
+        RequireAddress(_settings.Destination.RouterAddress, "Lab8Settings:Destination:RouterAddress");
+
+        if (_settings.Destination.ChainSelector == 0)
         {
             throw new InvalidOperationException(
-                "У appsettings.json не задано Lab7Settings:RouterAddress — адресу Router-контракту " +
-                "Uniswap V2 (або сумісного форку) у тій мережі, куди виконується деплой.");
+                "У Lab8Settings:Destination:ChainSelector не задано CCIP Chain Selector цільової мережі " +
+                "(довідник: https://docs.chain.link/ccip/directory).");
         }
 
-        if (_settings.DepositAmount <= 0 || _settings.RewardAmount <= 0 ||
-            _settings.PoolLiquidityA <= 0 || _settings.PoolLiquidityB <= 0)
+        if (string.IsNullOrWhiteSpace(_settings.MessageText))
         {
-            throw new InvalidOperationException(
-                "У Lab7Settings мають бути додатними DepositAmount, RewardAmount, PoolLiquidityA та PoolLiquidityB.");
+            throw new InvalidOperationException("Lab8Settings:MessageText не може бути порожнім.");
         }
 
-        if (string.IsNullOrWhiteSpace(_settings.TokenA.Symbol) || string.IsNullOrWhiteSpace(_settings.TokenB.Symbol))
+        if (_settings.LinkFundingAmount <= 0)
         {
-            throw new InvalidOperationException("У Lab7Settings:TokenA та TokenB мають бути задані Name і Symbol.");
+            throw new InvalidOperationException("Lab8Settings:LinkFundingAmount має бути додатним.");
         }
     }
 
-    private async Task<TokenDeploymentResult> EnsureTokenAsync(TokenSettings settings, string? knownAddress, CancellationToken cancellationToken)
+    private static void RequireAddress(string value, string settingName)
     {
-        if (!string.IsNullOrWhiteSpace(knownAddress) && await HasContractCodeAsync(knownAddress))
+        if (string.IsNullOrWhiteSpace(value) || value.StartsWith("0x_", StringComparison.OrdinalIgnoreCase))
         {
-            return await _tokenService.DescribeAsync(settings, knownAddress, cancellationToken);
+            throw new InvalidOperationException(
+                $"У appsettings.json не задано {settingName} — візьміть адресу з CCIP Directory (docs.chain.link/ccip/directory).");
         }
-
-        return await _tokenService.DeployAsync(settings, cancellationToken);
     }
 
-    private async Task<VaultDeploymentResult> EnsureVaultAsync(string? knownAddress, string assetAddress, string rewardAddress, CancellationToken cancellationToken)
+    private static bool SameAddress(string? a, string b) =>
+        string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+
+    private async Task<ReceiverDeploymentResult> EnsureReceiverAsync(string? knownAddress, CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(knownAddress) && await HasContractCodeAsync(knownAddress))
+        if (!string.IsNullOrWhiteSpace(knownAddress) &&
+            await HasContractCodeAsync(_web3Factory.DestinationClient, knownAddress))
         {
-            return new VaultDeploymentResult(
-                knownAddress, assetAddress, rewardAddress, _settings.RouterAddress,
+            return new ReceiverDeploymentResult(
+                knownAddress, _settings.Destination.RouterAddress,
                 WasAlreadyDeployed: true, TransactionHash: null);
         }
 
-        return await _vaultService.DeployAsync(assetAddress, rewardAddress, _settings.RouterAddress, cancellationToken);
+        return await _receiverService.DeployAsync(_settings.Destination.RouterAddress, cancellationToken);
     }
 
-    private async Task<bool> HasContractCodeAsync(string address)
+    private async Task<MessengerDeploymentResult> EnsureMessengerAsync(string? knownAddress, CancellationToken cancellationToken)
     {
-        var code = await _web3Factory.Client.Eth.GetCode.SendRequestAsync(address);
+        if (!string.IsNullOrWhiteSpace(knownAddress) &&
+            await HasContractCodeAsync(_web3Factory.Client, knownAddress))
+        {
+            return new MessengerDeploymentResult(
+                knownAddress, _settings.Source.RouterAddress, _settings.Source.LinkTokenAddress,
+                WasAlreadyDeployed: true, TransactionHash: null);
+        }
+
+        return await _messengerService.DeployAsync(
+            _settings.Source.RouterAddress, _settings.Source.LinkTokenAddress, cancellationToken);
+    }
+
+    private async Task<LinkFundingResult> EnsureMessengerFundedAsync(string messenger, string user, CancellationToken cancellationToken)
+    {
+        var link = _settings.Source.LinkTokenAddress;
+
+        var messengerBalance = await _linkService.BalanceOfAsync(link, messenger, cancellationToken);
+        var deployerBalance = await _linkService.BalanceOfAsync(link, user, cancellationToken);
+
+        decimal sent = 0m;
+        string? tx = null;
+
+        if (messengerBalance < _settings.LinkFundingAmount)
+        {
+            sent = _settings.LinkFundingAmount - messengerBalance;
+
+            if (deployerBalance < sent)
+            {
+                throw new InvalidOperationException(
+                    $"Недостатньо LINK на гаманці ({deployerBalance}): потрібно ще {sent}. " +
+                    "Отримайте тестові LINK на https://faucets.chain.link/sepolia.");
+            }
+
+            tx = await _linkService.TransferAsync(link, messenger, sent, cancellationToken);
+
+            messengerBalance = await _linkService.BalanceOfAsync(link, messenger, cancellationToken);
+            deployerBalance = await _linkService.BalanceOfAsync(link, user, cancellationToken);
+        }
+
+        return new LinkFundingResult(link, sent, tx, messengerBalance, deployerBalance);
+    }
+
+    private static async Task<bool> HasContractCodeAsync(Web3 client, string address)
+    {
+        var code = await client.Eth.GetCode.SendRequestAsync(address);
         return !string.IsNullOrEmpty(code) && code != "0x";
     }
 }
