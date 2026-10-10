@@ -7,8 +7,6 @@ using Nethereum.JsonRpc.Client;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-//   dotnet run             -> деплой, поповнення LINK та відправка крос-чейн повідомлення (контрольне завдання)
-//   dotnet run -- --track  -> агент очікує доставки останнього повідомлення в цільовій мережі
 var runTrack = args.Contains("--track");
 
 var configuration = new ConfigurationBuilder()

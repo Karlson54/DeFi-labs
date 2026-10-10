@@ -16,7 +16,6 @@ public interface IMessengerService
     Task<SendResult> SendMessageAsync(string messengerAddress, ulong chainSelector, string receiver, string text, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Робота з CrossChainMessenger у ВИХІДНІЙ мережі (L1).</summary>
 public sealed class MessengerService : IMessengerService
 {
     private const int Decimals = 18;
@@ -98,7 +97,6 @@ public sealed class MessengerService : IMessengerService
                 "або викликає не власник контракту.");
         }
 
-        // messageId народжується лише всередині Router-а — клієнт дістає його з події MessageSent.
         var sent = receipt.DecodeAllEvents<MessageSentEventDto>().FirstOrDefault()
             ?? throw new InvalidOperationException(
                 "У чеку транзакції немає події MessageSent. Схоже, в артефакті лежить байткод іншої версії контракту.");

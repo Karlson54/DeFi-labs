@@ -9,10 +9,6 @@ public interface IScenarioRunner
     Task<ScenarioReport> RunAsync(CancellationToken cancellationToken = default);
 }
 
-/// <summary>
-/// Оркестрація контрольного завдання: receiver у L2 -> messenger у L1 ->
-/// поповнення LINK -> розрахунок комісії -> sendMessage.
-/// </summary>
 public sealed class ScenarioRunner : IScenarioRunner
 {
     private readonly IWeb3Factory _web3Factory;
@@ -49,8 +45,6 @@ public sealed class ScenarioRunner : IScenarioRunner
 
         var state = await _stateStore.LoadAsync(chainId, user, cancellationToken);
 
-        // Крок 1. Контракт-отримувач у цільовій L2-мережі.
-        // Якщо Router у налаштуваннях змінився — старий контракт непридатний, розгортаємо новий.
         var knownReceiver = SameAddress(state.DestinationRouterAddress, destination.RouterAddress)
             ? state.ReceiverAddress
             : null;
@@ -58,7 +52,6 @@ public sealed class ScenarioRunner : IScenarioRunner
         state = state with { ReceiverAddress = receiver.Address, DestinationRouterAddress = destination.RouterAddress };
         await _stateStore.SaveAsync(state, cancellationToken);
 
-        // Крок 2. Месенджер у вихідній мережі (immutable router/link -> зміна адрес = новий деплой).
         var knownMessenger =
             SameAddress(state.SourceRouterAddress, source.RouterAddress) &&
             SameAddress(state.LinkTokenAddress, source.LinkTokenAddress)
@@ -73,10 +66,8 @@ public sealed class ScenarioRunner : IScenarioRunner
         };
         await _stateStore.SaveAsync(state, cancellationToken);
 
-        // Крок 3. Поповнення LINK-балансу контракту (комісію платить саме він).
         var funding = await EnsureMessengerFundedAsync(messenger.Address, user, cancellationToken);
 
-        // Крок 4. Комісія оракулів: view-запит до Router-а через контракт, газ не витрачається.
         var fee = await _messengerService.GetFeeAsync(
             messenger.Address, destination.ChainSelector, receiver.Address, _settings.MessageText, cancellationToken);
 
@@ -87,7 +78,6 @@ public sealed class ScenarioRunner : IScenarioRunner
                 "Збільште Lab8Settings:LinkFundingAmount.");
         }
 
-        // Крок 5. Відправка повідомлення.
         var send = await _messengerService.SendMessageAsync(
             messenger.Address, destination.ChainSelector, receiver.Address, _settings.MessageText, cancellationToken);
 

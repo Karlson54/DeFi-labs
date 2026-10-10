@@ -7,10 +7,8 @@ namespace DeFi.Services;
 
 public interface IWeb3Factory
 {
-    /// <summary>Клієнт вихідної мережі (L1, Sepolia).</summary>
     Web3 Client { get; }
 
-    /// <summary>Клієнт цільової мережі (L2, Arbitrum Sepolia).</summary>
     Web3 DestinationClient { get; }
 
     string AccountAddress { get; }
@@ -20,10 +18,6 @@ public interface IWeb3Factory
     long DestinationChainId { get; }
 }
 
-/// <summary>
-/// Створює два Web3-клієнти з ОДНИМ приватним ключем. EVM-адреса акаунта
-/// однакова в усіх EVM-мережах, відрізняються лише RPC та Chain ID (ключова ідея лаб. №8).
-/// </summary>
 public sealed class Web3Factory : IWeb3Factory
 {
     private readonly Lazy<Web3> _client;
@@ -75,7 +69,6 @@ public sealed class Web3Factory : IWeb3Factory
                 "в конфіг класти не можна, і файл із ним не можна комітити в git.");
         }
 
-        // Chain ID входить у підпис транзакції (EIP-155), тому для кожної мережі свій Account.
         return new Account(key, chainId);
     }
 }

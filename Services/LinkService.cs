@@ -13,7 +13,6 @@ public interface ILinkService
     Task<string> TransferAsync(string tokenAddress, string to, decimal amount, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Мінімальна робота з ERC-20 LINK у вихідній мережі.</summary>
 public sealed class LinkService : ILinkService
 {
     private const int Decimals = 18;

@@ -9,11 +9,9 @@ public interface IReceiverService
 {
     Task<ReceiverDeploymentResult> DeployAsync(string routerAddress, CancellationToken cancellationToken = default);
 
-    /// <summary>Повертає null, якщо жодне повідомлення ще не доставлено.</summary>
     Task<ReceivedMessage?> GetLastMessageAsync(string receiverAddress, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Робота з CrossChainReceiver у ЦІЛЬОВІЙ мережі (L2) через DestinationClient.</summary>
 public sealed class ReceiverService : IReceiverService
 {
     private readonly IWeb3Factory _web3Factory;
@@ -62,7 +60,6 @@ public sealed class ReceiverService : IReceiverService
             .QueryAsync<byte[]>(receiverAddress, new LastMessageIdFunction())
             .WaitAsync(_timeout, cancellationToken);
 
-        // Порожній bytes32 (всі нулі) означає, що повідомлень ще не було.
         if (idBytes is null || idBytes.All(b => b == 0))
         {
             return null;

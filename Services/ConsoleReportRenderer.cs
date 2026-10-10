@@ -44,25 +44,25 @@ public sealed class ConsoleReportRenderer : IReportRenderer
             sb.AppendLine($"  Транзакція деплою.....: {report.Messenger.TransactionHash}");
         }
 
-        Header(sb, "КРОК 3. ПОПОВНЕННЯ LINK-БАЛАНСУ МЕСЕНДЖЕРА");
+        Header(sb, "КРОК 3. ПОПОВНЕННЯ ETH-БАЛАНСУ МЕСЕНДЖЕРА");
         if (report.Funding.TransactionHash is null)
         {
-            sb.AppendLine("  Пропущено.............: на балансі контракту вже достатньо LINK");
+            sb.AppendLine("  Пропущено.............: на балансі контракту вже достатньо ETH");
         }
         else
         {
-            sb.AppendLine($"  Надіслано.............: {Num(report.Funding.Sent)} LINK");
+            sb.AppendLine($"  Надіслано.............: {Num(report.Funding.Sent)} ETH");
             sb.AppendLine($"  Транзакція............: {report.Funding.TransactionHash}");
         }
-        sb.AppendLine($"  Баланс месенджера.....: {Num(report.Funding.MessengerBalance)} LINK");
-        sb.AppendLine($"  Баланс гаманця........: {Num(report.Funding.DeployerBalance)} LINK");
+        sb.AppendLine($"  Баланс месенджера.....: {Num(report.Funding.MessengerBalance)} ETH");
+        sb.AppendLine($"  Баланс гаманця........: {Num(report.Funding.DeployerBalance)} ETH");
 
         Header(sb, "КРОК 4. РОЗРАХУНОК КОМІСІЇ (Router.getFee)");
-        sb.AppendLine($"  Орієнтовна комісія....: {Num(report.EstimatedFeeLink)} LINK");
+        sb.AppendLine($"  Орієнтовна комісія....: {Num(report.EstimatedFeeLink)} ETH");
 
         Header(sb, "КРОК 5. ВІДПРАВКА ПОВІДОМЛЕННЯ (sendMessage -> Router.ccipSend)");
         sb.AppendLine($"  Текст.................: {report.Send.Text}");
-        sb.AppendLine($"  Списано комісії.......: {Num(report.Send.FeeLink)} LINK");
+        sb.AppendLine($"  Списано комісії.......: {Num(report.Send.FeeLink)} ETH");
         sb.AppendLine($"  Транзакція............: {report.Send.TransactionHash} (gas: {report.Send.GasUsed})");
         sb.AppendLine($"  Блок..................: {report.Send.BlockNumber}");
         sb.AppendLine($"  messageId.............: {report.Send.MessageId}");

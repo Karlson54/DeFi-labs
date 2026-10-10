@@ -9,11 +9,6 @@ public interface IDeliveryTracker
     Task<DeliveryReport> TrackAsync(CancellationToken cancellationToken = default);
 }
 
-/// <summary>
-/// Off-chain агент, який стежить за доставкою: опитує контракт-отримувач у L2
-/// й порівнює lastMessageId з messageId, отриманим при відправці (подія MessageSent).
-/// Крос-чейн виконання асинхронне, тому тут потрібен цикл очікування, як у ботах лаб. №6 і №7.
-/// </summary>
 public sealed class DeliveryTracker : IDeliveryTracker
 {
     private readonly IWeb3Factory _web3Factory;

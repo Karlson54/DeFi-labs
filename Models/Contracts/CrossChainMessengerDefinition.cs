@@ -20,7 +20,6 @@ public class CrossChainMessengerDeployment : ContractDeploymentMessage
 [Function("sendMessage", "bytes32")]
 public class SendMessageFunction : FunctionMessage
 {
-    // uint64 у Solidity відповідає ulong у C#.
     [Parameter("uint64", "destinationChainSelector", 1)]
     public ulong DestinationChainSelector { get; set; }
 
@@ -44,7 +43,6 @@ public class GetFeeFunction : FunctionMessage
     public string Text { get; set; } = string.Empty;
 }
 
-/// <summary>DTO події MessageSent: звідси клієнт дістає messageId для відстеження доставки.</summary>
 [Event("MessageSent")]
 public class MessageSentEventDto : IEventDTO
 {
