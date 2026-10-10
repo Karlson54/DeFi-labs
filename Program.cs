@@ -93,6 +93,14 @@ catch (SmartContractRevertException ex)
         ex.Message);
     return 1;
 }
+catch (SmartContractCustomErrorRevertException ex)
+{
+    WriteError(
+        "Router/контракт відкотив виклик з кастомною помилкою.",
+        "Перші 4 байти (8 hex-символів після 0x) — селектор помилки.",
+        ex.ExceptionEncodedData ?? ex.Message);
+    return 1;
+}
 catch (TimeoutException ex)
 {
     WriteError(

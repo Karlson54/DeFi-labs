@@ -172,10 +172,13 @@ public sealed class ScenarioRunner : IScenarioRunner
 
     private async Task<LinkFundingResult> EnsureMessengerFundedAsync(string messenger, string user, CancellationToken cancellationToken)
     {
-        var link = _settings.Source.LinkTokenAddress;
+        var client = _web3Factory.Client;
 
-        var messengerBalance = await _linkService.BalanceOfAsync(link, messenger, cancellationToken);
-        var deployerBalance = await _linkService.BalanceOfAsync(link, user, cancellationToken);
+        async Task<decimal> EthBalanceAsync(string address) =>
+            Web3.Convert.FromWei((await client.Eth.GetBalance.SendRequestAsync(address)).Value, 18);
+
+        var messengerBalance = await EthBalanceAsync(messenger);
+        var deployerBalance = await EthBalanceAsync(user);
 
         decimal sent = 0m;
         string? tx = null;
@@ -184,20 +187,27 @@ public sealed class ScenarioRunner : IScenarioRunner
         {
             sent = _settings.LinkFundingAmount - messengerBalance;
 
-            if (deployerBalance < sent)
+            if (deployerBalance < sent + 0.005m)
             {
                 throw new InvalidOperationException(
-                    $"Недостатньо LINK на гаманці ({deployerBalance}): потрібно ще {sent}. " +
-                    "Отримайте тестові LINK на https://faucets.chain.link/sepolia.");
+                    $"Недостатньо Sepolia ETH на гаманці ({deployerBalance}): потрібно {sent} для месенджера плюс запас на газ.");
             }
 
-            tx = await _linkService.TransferAsync(link, messenger, sent, cancellationToken);
+            var receipt = await client.Eth.GetEtherTransferService()
+                .TransferEtherAndWaitForReceiptAsync(messenger, sent, gas: new System.Numerics.BigInteger(100000))
+                .WaitAsync(TimeSpan.FromMinutes(3), cancellationToken);
 
-            messengerBalance = await _linkService.BalanceOfAsync(link, messenger, cancellationToken);
-            deployerBalance = await _linkService.BalanceOfAsync(link, user, cancellationToken);
+            if (receipt.Status?.Value != 1)
+            {
+                throw new InvalidOperationException("Переказ ETH на контракт-месенджер відхилено мережею (status = 0).");
+            }
+
+            tx = receipt.TransactionHash;
+            messengerBalance = await EthBalanceAsync(messenger);
+            deployerBalance = await EthBalanceAsync(user);
         }
 
-        return new LinkFundingResult(link, sent, tx, messengerBalance, deployerBalance);
+        return new LinkFundingResult("native ETH", sent, tx, messengerBalance, deployerBalance);
     }
 
     private static async Task<bool> HasContractCodeAsync(Web3 client, string address)
