@@ -7,28 +7,30 @@ using Nethereum.JsonRpc.Client;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-var runTrack = args.Contains("--track");
+var runAttack = args.Contains("--attack");
 
 var configuration = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
     .AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false)
-    .AddEnvironmentVariables("DEFILAB8_")
+    .AddEnvironmentVariables("DEFILAB9_")
     .Build();
 
 var services = new ServiceCollection();
 
 services.Configure<Web3Settings>(configuration.GetSection("Web3Settings"));
-services.Configure<Lab8Settings>(configuration.GetSection("Lab8Settings"));
+services.Configure<Lab9Settings>(configuration.GetSection("Lab9Settings"));
 
 services.AddSingleton<IContractArtifactProvider, ContractArtifactProvider>();
 services.AddSingleton<IWeb3Factory, Web3Factory>();
 services.AddSingleton<IDeploymentStateStore, DeploymentStateStore>();
-services.AddSingleton<ILinkService, LinkService>();
-services.AddSingleton<IMessengerService, MessengerService>();
-services.AddSingleton<IReceiverService, ReceiverService>();
-services.AddSingleton<IDeliveryTracker, DeliveryTracker>();
+services.AddSingleton<IContractDeployer, ContractDeployer>();
+services.AddSingleton<ITokenService, TokenService>();
+services.AddSingleton<IProtocolService, ProtocolService>();
+services.AddSingleton<IDaoService, DaoService>();
+services.AddSingleton<IFlashLoanService, FlashLoanService>();
 services.AddSingleton<IScenarioRunner, ScenarioRunner>();
+services.AddSingleton<IAttackRunner, AttackRunner>();
 services.AddSingleton<IReportRenderer, ConsoleReportRenderer>();
 
 await using var provider = services.BuildServiceProvider();
@@ -44,20 +46,20 @@ try
 {
     var renderer = provider.GetRequiredService<IReportRenderer>();
 
-    if (runTrack)
+    if (runAttack)
     {
-        var tracker = provider.GetRequiredService<IDeliveryTracker>();
-        var delivery = await tracker.TrackAsync(cts.Token);
-        Console.WriteLine(renderer.Render(delivery));
-        return delivery.Delivered ? 0 : 1;
+        Console.WriteLine("Симуляція Flash Loan-атаки на вразливий ціновий оракул (Лаб. роб. №9)...");
+        Console.WriteLine("Розгортається чистий стенд: токени, пул, оракули, два кредитори, атакуючі.");
+
+        var attack = await provider.GetRequiredService<IAttackRunner>().RunAsync(cts.Token);
+        Console.WriteLine(renderer.Render(attack));
+        return 0;
     }
 
-    var runner = provider.GetRequiredService<IScenarioRunner>();
+    Console.WriteLine("Запуск децентралізованого управління: DAO змінює параметр протоколу (Лаб. роб. №9)...");
+    Console.WriteLine("Скрипт чекає завершення голосування (SimpleDAO.VOTING_PERIOD) — це близько хвилини.");
 
-    Console.WriteLine("Запуск крос-чейн взаємодії L1 -> L2 через Chainlink CCIP (Лаб. роб. №8)...");
-    Console.WriteLine("Перший запуск розгортає контракти у двох мережах — це може зайняти кілька хвилин.");
-
-    var report = await runner.RunAsync(cts.Token);
+    var report = await provider.GetRequiredService<IScenarioRunner>().RunAsync(cts.Token);
     Console.WriteLine(renderer.Render(report));
     return 0;
 }
@@ -70,7 +72,7 @@ catch (HttpRequestException ex)
 {
     WriteError(
         "Не вдалося підключитися до RPC-вузла.",
-        "Перевірте Web3Settings:RpcUrl (вихідна мережа), Lab8Settings:Destination:RpcUrl (L2) та інтернет-з'єднання.",
+        "Перевірте Web3Settings:RpcUrl та чи запущена локальна нода (npx hardhat node).",
         ex.Message);
     return 1;
 }
@@ -78,23 +80,20 @@ catch (RpcResponseException ex)
 {
     WriteError(
         "Вузол відхилив запит.",
-        "Типові причини: недостатньо тестового ETH на газ (у L1 або L2), невірні адреси Router-а, " +
-        "непідтримуваний напрямок (UnsupportedDestinationChain — перевірте chain selector) або брак LINK.",
+        "Типові причини: недостатньо ETH на газ, відкат через require у контракті " +
+        "або застарілий файл стану після перезапуску ноди (видаліть deployment-state-lab9.json).",
         ex.Message);
     return 1;
 }
 catch (SmartContractRevertException ex)
 {
-    WriteError(
-        "Транзакцію відкотив смарт-контракт.",
-        "Перевірте LINK-баланс месенджера, chain selector та те, що викликає власник контракту.",
-        ex.Message);
+    WriteError("Транзакцію відкотив смарт-контракт.", "Перевірте причину відкату нижче.", ex.Message);
     return 1;
 }
 catch (SmartContractCustomErrorRevertException ex)
 {
     WriteError(
-        "Router/контракт відкотив виклик з кастомною помилкою.",
+        "Контракт відкотив виклик з кастомною помилкою.",
         "Перші 4 байти (8 hex-символів після 0x) — селектор помилки.",
         ex.ExceptionEncodedData ?? ex.Message);
     return 1;
@@ -103,7 +102,7 @@ catch (TimeoutException ex)
 {
     WriteError(
         "Транзакція не потрапила в блок за відведений час.",
-        "Збільште Web3Settings:TransactionTimeoutSeconds або перевірте завантаженість мережі.",
+        "Збільште Web3Settings:TransactionTimeoutSeconds або перевірте, чи майнить нода блоки.",
         ex.Message);
     return 1;
 }
